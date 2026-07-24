@@ -1,0 +1,38 @@
+# Opencode
+SESSION_NOTES.md
+NEXT_STEPS.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+data/
+
+# Generated reports and plots
+data/**/*.pcf.txt
+data/**/*.ESF.txt
+data/**/*.BSF.txt
+data/**/*.bsf.txt
+data/**/*.ESF.png
+data/**/*.bsf.png

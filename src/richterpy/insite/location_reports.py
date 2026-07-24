@@ -1,0 +1,1 @@
+"""InSite location report helpers."""

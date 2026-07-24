@@ -1,0 +1,14 @@
+name: seismology
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.11
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scipy
+  - obspy
+  - pip
+  - pip:
+      - -e .
