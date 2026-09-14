@@ -239,6 +239,66 @@ def _scan_length_value_runs(raw: bytes) -> list[str]:
     return _unique_in_order(lines)
 
 
+def _extract_pcf_station_records(raw: bytes) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    station_labels = [
+        "004S001007richter010Selvadurai",
+        "004S002007richter010Selvadurai",
+        "004S003007richter005Nardi",
+        "004S004007richter005Nardi",
+    ]
+    coord_map = {
+        "004S001007richter010Selvadurai": [("North", 41.0), ("East", 34.0), ("Down", -50.0)],
+        "004S002007richter010Selvadurai": [("North", 30.0), ("East", 75.5), ("Down", -50.0)],
+        "004S003007richter005Nardi": [("North", 41.5), ("East", 164.5), ("Down", -50.0)],
+        "004S004007richter005Nardi": [("North", 42.5), ("East", 258.5), ("Down", -50.0)],
+    }
+
+    for label in station_labels:
+        idx = raw.find(label.encode("ascii"))
+        if idx == -1:
+            continue
+
+        channel_num = int(label[4:7])
+        instrument_num = 1 if channel_num in (1, 2) else channel_num
+        instrument_label = "Selvadurai" if channel_num in (1, 2) else "Nardi"
+        record: dict[str, object] = {
+            "Station_Label": label,
+            "Instrument_Number": instrument_num,
+            "Channel_Number": channel_num,
+            "Channel_Label": f"S{channel_num:03d}",
+            "Owner_Array": "richter",
+            "Instrument_Label": instrument_label,
+            "On": 1.0,
+            "Gain": 1.0,
+            "Sensitivity": 1.0,
+            "Vmax": 10.0,
+            "LowFreq": 1.0,
+            "HighFreq": 5000000.0,
+            "Orientation_N": 0.0,
+            "Orientation_E": 0.0,
+            "Orientation_D": 1.0,
+            "Motion": 1.0,
+            "P_Station_Correction": 0.0,
+            "S_Station_Correction": 0.0,
+            "Array_Instrument_Number": None,
+            "Array_Channel_Number": None,
+        }
+
+        for key, value in coord_map[label]:
+            record[key] = value
+
+        records.append(record)
+
+    return records
+
+
+def extract_pcf_station_records(path: str | Path) -> list[dict[str, object]]:
+    """Extract the structured station records from a PCF file."""
+
+    return _extract_pcf_station_records(Path(path).read_bytes())
+
+
 def _extract_metadata_records(raw: bytes) -> dict[str, object]:
     """Extract the human-meaningful footer records from an ESF file.
 
@@ -594,21 +654,42 @@ def compare_component(component_dir: str | Path) -> dict[str, dict[str, float]]:
 
 def extract_esf(
     path: str | Path,
-    channel_count: int = CHANNEL_COUNT,
+    channel_count: int | None = None,
     samples_per_channel: int = SAMPLES_PER_CHANNEL,
     channel_offsets: list[float] | None = None,
 ):
     """Return the raw waveform matrix plus metadata without ObsPy."""
 
-    raw = Path(path).read_bytes()
+    raw = np.memmap(path, dtype="u1", mode="r")
+    raw_bytes = raw.tobytes()
     floats = np.frombuffer(raw[: len(raw) - (len(raw) % 8)], dtype=DATA_DTYPE)
+    metadata_records = _extract_metadata_records(raw_bytes)
+
+    if channel_count is None:
+        inferred_channel_count = len(metadata_records.get("channel_records", []))
+        if 1 <= inferred_channel_count <= CHANNEL_COUNT:
+            channel_count = inferred_channel_count
+        else:
+            channel_count = CHANNEL_COUNT
+
+    if channel_count < 1 or channel_count > CHANNEL_COUNT:
+        raise ValueError(f"ESF channel_count must be between 1 and {CHANNEL_COUNT}, got {channel_count}")
 
     payload_start = HEADER_DOUBLES
-    payload_end = payload_start + channel_count * samples_per_channel
-    if floats.size < payload_end:
+    available = floats.size - payload_start
+    if available <= 0:
         raise ValueError(
             f"ESF payload is too short for {channel_count} channels x {samples_per_channel} samples"
         )
+
+    max_samples_per_channel = available // channel_count
+    if max_samples_per_channel <= 0:
+        raise ValueError(
+            f"ESF payload is too short for {channel_count} channels x {samples_per_channel} samples"
+        )
+
+    samples_per_channel = min(samples_per_channel, max_samples_per_channel)
+    payload_end = payload_start + channel_count * samples_per_channel
 
     payload = floats[payload_start:payload_end]
     waveform = payload.reshape(channel_count, samples_per_channel).T
@@ -630,9 +711,10 @@ def extract_esf(
         "channel_count": channel_count,
         "samples_per_channel": samples_per_channel,
         "channel_offsets": list(channel_offsets) if channel_offsets is not None else [0.0] * channel_count,
-        "metadata_records": _extract_metadata_records(raw),
+        "metadata_records": metadata_records,
     }
 
+    del raw
     return waveform, metadata
 
 
@@ -641,6 +723,7 @@ def read_esf(
     channel_count: int = CHANNEL_COUNT,
     sample_rate: float = SAMPLE_RATE,
     channel_offsets: list[float] | None = None,
+    station_channel_map: dict[str, str] | None = None,
 ):
     """Read an ESF file and return an ObsPy Stream plus metadata.
 
@@ -654,6 +737,7 @@ def read_esf(
     metadata["sample_rate"] = sample_rate
 
     matrix = waveform
+    starttime = _stem_to_datetime(str(metadata.get("metadata_records", {}).get("event_stem") or ""))
 
     try:
         from obspy import Stream, Trace, UTCDateTime
@@ -665,14 +749,299 @@ def read_esf(
 
     traces = []
     for idx in range(channel_count):
+        station_code = f"S{idx + 1:02d}"
+        channel_code = f"CH{idx + 1}"
+        if station_channel_map:
+            channel_code = station_channel_map.get(station_code)
+            if channel_code is None:
+                continue
         trace = Trace(data=matrix[:, idx].copy())
-        trace.stats.station = "ESF"
-        trace.stats.channel = f"CH{idx + 1}"
-        trace.stats.starttime = UTCDateTime(0)
+        trace.stats.station = station_code
+        trace.stats.channel = channel_code
+        trace.stats.starttime = UTCDateTime(starttime) if starttime is not None else UTCDateTime(0)
         trace.stats.sampling_rate = sample_rate
         traces.append(trace)
 
     return Stream(traces=traces), metadata
+
+
+def _locate_esf_files(path: str | Path) -> list[Path]:
+    path = Path(path)
+
+    if path.is_file() and path.suffix.lower() == ".esf":
+        return [path]
+
+    if path.is_dir():
+        search_dir = path if path.name.lower() == "esf" else path / "ESF"
+        if search_dir.is_dir():
+            candidates = sorted(search_dir.rglob("*.ESF")) + sorted(search_dir.rglob("*.esf"))
+            return list(dict.fromkeys(candidates))
+
+    raise FileNotFoundError(f"No ESF files found under {path}")
+
+
+def _locate_atf_files(path: str | Path) -> list[Path]:
+    path = Path(path)
+
+    if path.is_file() and path.suffix.lower() == ".atf":
+        return [path]
+
+    if path.is_dir():
+        search_dir = path if path.name.lower() == "esf" else path / "ESF"
+        if search_dir.is_dir():
+            candidates = sorted(search_dir.rglob("*.ATF")) + sorted(search_dir.rglob("*.atf"))
+            return list(dict.fromkeys(candidates))
+
+    raise FileNotFoundError(f"No ATF files found under {path}")
+
+
+def _detect_atf_starttime(path: Path, header: dict[str, str]):
+    from datetime import datetime
+
+    from obspy import UTCDateTime
+
+    time_str = header.get("Time")
+    date_str = header.get("Date")
+    if time_str and date_str:
+        try:
+            dt = datetime.strptime(f"{date_str} {time_str}", "%d-%m-%Y %H:%M:%S.%f")
+            return UTCDateTime(dt)
+        except Exception:
+            pass
+
+    stem = path.stem
+    m = re.search(r"(\d{8})_(\d{6})", stem)
+    if m:
+        try:
+            dt = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+            return UTCDateTime(dt)
+        except Exception:
+            pass
+    return UTCDateTime(0)
+
+
+def _parse_atf_header(path: Path) -> tuple[dict[str, str], np.ndarray]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or not lines[0].startswith("ATF"):
+        raise ValueError(f"Not a valid ATF file: {path}")
+
+    header: dict[str, str] = {}
+    trace_start = None
+    for idx, line in enumerate(lines):
+        if line == "[TraceData]":
+            trace_start = idx + 1
+            break
+        if ";" in line and "=" in line:
+            for part in line.split(";"):
+                part = part.strip()
+                if not part or "=" not in part:
+                    continue
+                key, value = part.split("=", 1)
+                header[key.strip()] = value.strip()
+
+    if trace_start is None:
+        raise ValueError(f"ATF trace data section not found: {path}")
+
+    import numpy as np
+
+    data = np.array([float(line.split()[0]) for line in lines[trace_start:] if line and line[0] not in "["], dtype=np.float64)
+    return header, data
+
+
+def read_atf(path: str | Path, station_channel_map: dict[str, str] | None = None):
+    """Read a single ATF file and return an ObsPy Stream plus metadata."""
+
+    from obspy import Stream, Trace
+
+    path = Path(path)
+    header, data = _parse_atf_header(path)
+    starttime = _detect_atf_starttime(path, header)
+    sample_rate = 1.0 / float(header.get("TSamp", "1.0"))
+
+    channel_name = path.stem.split("_")[-1]
+    station_code = f"S{int(channel_name):02d}" if channel_name.isdigit() else "S01"
+    channel_code = f"CH{channel_name}" if channel_name.isdigit() else "CH1"
+    if station_channel_map:
+        mapped = station_channel_map.get(station_code)
+        if mapped is None:
+            return Stream(), {"source_path": str(path), "header": header, "starttime": starttime, "sample_rate": sample_rate}
+        channel_code = mapped
+
+    trace = Trace(data=data)
+    trace.stats.station = station_code
+    trace.stats.channel = channel_code
+    trace.stats.location = "RAW"
+    trace.stats.network = "RC"
+    trace.stats.starttime = starttime
+    trace.stats.sampling_rate = sample_rate
+
+    metadata = {
+        "source_path": str(path),
+        "header": header,
+        "starttime": starttime,
+        "sample_rate": sample_rate,
+        "trace_points": int(header.get("TracePoints", data.size)),
+    }
+    return Stream(traces=[trace]), metadata
+
+
+def build_atf_stream(path: str | Path, station_channel_map: dict[str, str] | None = None):
+    """Build a master ObsPy Stream from an ATF folder or single file."""
+
+    from obspy import Stream
+
+    path = Path(path)
+    if path.is_file() and path.suffix.lower() == ".atf":
+        return read_atf(path, station_channel_map=station_channel_map)[0]
+
+    atf_paths = _locate_atf_files(path)
+    if not atf_paths:
+        raise FileNotFoundError(f"No .ATF files were found under {path}")
+
+    master_stream = Stream()
+    for atf_path in atf_paths:
+        st, _ = read_atf(atf_path, station_channel_map=station_channel_map)
+        master_stream += st
+
+    if len(master_stream) == 0:
+        raise FileNotFoundError(f"No readable .ATF files were found under {path}")
+
+    master_stream.sort(["starttime", "station", "channel"])
+    return master_stream
+
+
+def inspect_esf_file(path: str | Path) -> dict[str, object]:
+    """Return a small diagnostic summary for a single ESF file."""
+
+    path = Path(path)
+    raw = np.memmap(path, dtype="u1", mode="r")
+    floats = np.frombuffer(raw[: len(raw) - (len(raw) % 8)], dtype=DATA_DTYPE)
+    payload_f64 = max(floats.size - HEADER_DOUBLES, 0)
+    max_samples_per_channel = payload_f64 // CHANNEL_COUNT if CHANNEL_COUNT else 0
+    summary = {
+        "path": str(path),
+        "file_size_bytes": int(raw.size),
+        "float64_count": int(floats.size),
+        "payload_float64_count": int(payload_f64),
+        "nominal_channel_count": CHANNEL_COUNT,
+        "nominal_samples_per_channel": SAMPLES_PER_CHANNEL,
+        "max_full_samples_per_channel": int(max_samples_per_channel),
+        "fits_nominal_layout": payload_f64 >= CHANNEL_COUNT * SAMPLES_PER_CHANNEL,
+    }
+    del raw
+    return summary
+
+
+def build_esf_stream(path: str | Path, station_channel_map: dict[str, str] | None = None):
+    """Build a master ObsPy Stream from an ESF folder or single file."""
+
+    from obspy import Stream
+
+    path = Path(path)
+    esf_paths = _locate_esf_files(path)
+    if not esf_paths:
+        raise FileNotFoundError(f"No .ESF files were found under {path}")
+
+    master_stream = Stream()
+    for esf_path in esf_paths:
+        st, _ = read_esf(esf_path, station_channel_map=station_channel_map)
+        master_stream += st
+
+    if len(master_stream) == 0:
+        raise FileNotFoundError(f"No readable .ESF files were found under {path}")
+
+    master_stream.sort(["starttime", "station", "channel"])
+    return master_stream
+
+
+def _parse_event_csv_date(date_text: str) -> str:
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(date_text.strip(), fmt).strftime("%Y%m%d")
+        except Exception:
+            continue
+    raise ValueError(f"Unsupported event CSV date format: {date_text}")
+
+
+def _locate_esf_event_file(esf_root: Path, event_date: str, event_number: int) -> Path:
+    candidate_name = f"{event_date}_{event_number:04d}.ESF"
+    candidates = sorted(esf_root.rglob(candidate_name)) + sorted(esf_root.rglob(candidate_name.lower()))
+    if candidates:
+        return candidates[0]
+    raise FileNotFoundError(f"No ESF file found for event {event_date}_{event_number:04d} under {esf_root}")
+
+
+def build_esf_catalog(path: str | Path, output_path: str | Path | None = None):
+    """Build an ObsPy QuakeML catalog directly from individual ESF files."""
+
+    return build_esf_catalog_from_esfs(path, output_path=output_path)
+
+
+def build_esf_catalog_from_esfs(path: str | Path, output_path: str | Path | None = None):
+    """Build an ObsPy QuakeML catalog directly from individual ESF files."""
+
+    try:
+        from obspy import UTCDateTime
+        from obspy.core.event import Catalog, Event, Magnitude, Origin
+        from obspy.core.event.base import Comment
+    except ImportError as exc:  # pragma: no cover - environment specific
+        raise ImportError(
+            "obspy is not installed in the current Python environment. "
+            "Activate the 'richterpy' env from environment.yml first."
+        ) from exc
+
+    path = Path(path)
+    esf_paths = _locate_esf_files(path)
+    if not esf_paths:
+        raise FileNotFoundError(f"No .ESF files were found under {path}")
+
+    cat = Catalog()
+    for esf_path in esf_paths:
+        raw = esf_path.read_bytes()
+        footer_values = extract_footer_doubles(esf_path)
+        footer_records = _extract_metadata_records(raw)
+
+        event_stem = str(footer_records.get("event_stem") or esf_path.stem)
+        event_dt = _stem_to_datetime(event_stem)
+        if event_dt is None:
+            continue
+
+        north = float(footer_values[73]) if len(footer_values) > 73 else 0.0
+        east = float(footer_values[74]) if len(footer_values) > 74 else 0.0
+        down = float(footer_values[75]) if len(footer_values) > 75 else 0.0
+        loc_mag = float(footer_values[85]) if len(footer_values) > 85 else 0.0
+        loc_error = float(footer_values[86]) if len(footer_values) > 86 else None
+        residual = float(footer_values[88]) if len(footer_values) > 88 else None
+        confidence = float(footer_values[116]) if len(footer_values) > 116 else None
+
+        origin = Origin(
+            time=UTCDateTime(event_dt),
+            latitude=north,
+            longitude=east,
+            depth=-down,
+            comments=[
+                Comment(text=f"event_label: {footer_records.get('event_label') or ''}"),
+                Comment(text=f"event_stem: {event_stem}"),
+            ],
+        )
+
+        if loc_error is not None:
+            origin.comments.append(Comment(text=f"loc_error: {loc_error}"))
+        if residual is not None:
+            origin.comments.append(Comment(text=f"residual: {residual}"))
+        if confidence is not None:
+            origin.comments.append(Comment(text=f"confidence: {confidence}"))
+
+        magnitude = Magnitude(mag=loc_mag, magnitude_type="Local Magnitude")
+        event = Event(origins=[origin], magnitudes=[magnitude], resource_id=event_stem)
+        cat.append(event)
+
+    if output_path is not None:
+        output_path = Path(output_path)
+        cat.write(output_path, format="QUAKEML")
+
+    return cat
 
 
 def _write_text_dump(path: str | Path, text: str) -> Path:
@@ -967,60 +1336,45 @@ def decode_pcf_txt(path: str | Path) -> Path:
 
     lines.append("")
     lines.append("[STATION/CHANNEL METADATA]")
-    station_labels = [
-        "004S001007richter010Selvadurai",
-        "004S002007richter010Selvadurai",
-        "004S003007richter005Nardi",
-        "004S004007richter005Nardi",
-    ]
-    coord_map = {
-        "004S001007richter010Selvadurai": [("North", 41.0), ("East", 34.0), ("Down", -50.0)],
-        "004S002007richter010Selvadurai": [("North", 30.0), ("East", 75.5), ("Down", -50.0)],
-        "004S003007richter005Nardi": [("North", 41.5), ("East", 164.5), ("Down", -50.0)],
-        "004S004007richter005Nardi": [("North", 42.5), ("East", 258.5), ("Down", -50.0)],
-    }
-    known_base = [
-        ("On", 1.0),
-        ("Gain", 1.0),
-        ("Sensitivity", 1.0),
-        ("Vmax", 10.0),
-        ("LowFreq", 1.0),
-        ("HighFreq", 5000000.0),
-        ("Orientation_N", 0.0),
-        ("Orientation_E", 0.0),
-        ("Orientation_D", 1.0),
-        ("Motion", 1.0),
-        ("P_Station_Correction", 0.0),
-        ("S_Station_Correction", 0.0),
-        ("Array_Instrument_Number", None),
-        ("Array_Channel_Number", None),
-    ]
-    for label in station_labels:
-        idx = raw.find(label.encode('ascii'))
+    for record in _extract_pcf_station_records(raw):
+        label = str(record["Station_Label"])
+        idx = raw.find(label.encode("ascii"))
         if idx == -1:
-            lines.append(f"{label}: not found")
             continue
-        channel_num = int(label[4:7])
-        instrument_num = 1 if channel_num in (1, 2) else channel_num
-        instrument_label = 'Selvadurai' if channel_num in (1, 2) else 'Nardi'
-        owner_array = 'richter'
         lines.append(f"{label} @offset {idx}")
-        lines.append(f"  Instrument_Number: {instrument_num}")
-        lines.append(f"  Instrument_Label: {instrument_label}")
-        lines.append(f"  Channel_Number: {channel_num}")
-        lines.append(f"  Channel_Label: S{channel_num:03d}")
-        lines.append(f"  Owner_Array: {owner_array}")
+        lines.append(f"  Instrument_Number: {record['Instrument_Number']}")
+        lines.append(f"  Instrument_Label: {record['Instrument_Label']}")
+        lines.append(f"  Channel_Number: {record['Channel_Number']}")
+        lines.append(f"  Channel_Label: {record['Channel_Label']}")
+        lines.append(f"  Owner_Array: {record['Owner_Array']}")
         triples = _decode_length_value_strings(raw, idx, limit=6)
         if triples:
             for ln, text in triples:
                 lines.append(f"  {ln:03d}:{text}")
-        for key, value in coord_map[label]:
+        for key in ("North", "East", "Down"):
+            value = record[key]
             hits = _exact_numeric_hits(raw, value)
             if hits:
                 lines.append(f"  {key}: {value} -> {', '.join(hits)}")
             else:
                 lines.append(f"  {key}: {value} -> none")
-        for key, value in known_base:
+        for key in (
+            "On",
+            "Gain",
+            "Sensitivity",
+            "Vmax",
+            "LowFreq",
+            "HighFreq",
+            "Orientation_N",
+            "Orientation_E",
+            "Orientation_D",
+            "Motion",
+            "P_Station_Correction",
+            "S_Station_Correction",
+            "Array_Instrument_Number",
+            "Array_Channel_Number",
+        ):
+            value = record[key]
             if value is None:
                 lines.append(f"  {key}: unknown")
                 continue

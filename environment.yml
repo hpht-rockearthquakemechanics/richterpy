@@ -1,14 +1,18 @@
-name: seismology
+name: richterpy
 channels:
   - conda-forge
+  - pyrocko
 dependencies:
   - python>=3.11
+  - ipykernel
   - numpy
   - pandas
-  - matplotlib
+  - matplotlib<3.8
   - seaborn
   - scipy
   - obspy
+  - pyrocko
+  - pyqt
   - pip
   - pip:
       - -e .
