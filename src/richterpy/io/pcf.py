@@ -3,8 +3,274 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import struct
 
-from richterpy.io.esf import decode_pcf_txt, extract_pcf_station_records
+
+def _extract_ascii_strings(raw: bytes, min_len: int = 4) -> list[str]:
+    strings: list[str] = []
+    current: list[str] = []
+    for byte in raw:
+        if 32 <= byte <= 126:
+            current.append(chr(byte))
+            continue
+        if len(current) >= min_len:
+            strings.append("".join(current).strip())
+        current = []
+    if len(current) >= min_len:
+        strings.append("".join(current).strip())
+    return strings
+
+
+def _unique_in_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _normalize_stream_label(text: str) -> str | None:
+    match = re.search(r"Data Streamed on \d{2}/\d{2}/\d{2}", text)
+    if match:
+        return match.group(0)
+    if "Data Streamed on" in text:
+        start = text.index("Data Streamed on")
+        return text[start:].strip()
+    return None
+
+
+def _extract_stream_entries(raw: bytes) -> list[str]:
+    entries: list[str] = []
+    for s in _extract_ascii_strings(raw):
+        if "Data Streamed on" not in s:
+            continue
+        label = _normalize_stream_label(s) or s
+        stem_match = re.search(r"(20\d{6}\d{6}_\d+)", s)
+        if stem_match:
+            entries.append(f"{label} | stem {stem_match.group(1)}")
+        else:
+            entries.append(label)
+    return _unique_in_order(entries)
+
+
+def _exact_numeric_hits(raw: bytes, value: float) -> list[str]:
+    hits: list[str] = []
+    for label, pat in [
+        ("f64le", struct.pack("<d", value)),
+        ("f64be", struct.pack(">d", value)),
+        ("f32le", struct.pack("<f", value)),
+        ("f32be", struct.pack(">f", value)),
+    ]:
+        idx = raw.find(pat)
+        if idx != -1:
+            hits.append(f"{label}@{idx}")
+    return hits
+
+
+def _extract_windows_paths(raw: bytes) -> list[str]:
+    paths: list[str] = []
+    for s in _extract_ascii_strings(raw):
+        if re.search(r"[A-Za-z]:\\", s):
+            if any(ext in s.lower() for ext in [".csv", ".rpt", ".esf", ".bsf", ".bif"]) or "m0013" in s.lower():
+                paths.append(s)
+    return _unique_in_order(paths)
+
+
+def _decode_length_value_strings(raw: bytes, start: int, limit: int = 16) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    pos = start
+    for _ in range(limit):
+        if pos + 3 > len(raw):
+            break
+        prefix = raw[pos:pos + 3]
+        if not prefix.isdigit():
+            break
+        ln = int(prefix)
+        pos += 3
+        if ln <= 0 or pos + ln > len(raw):
+            break
+        payload = raw[pos:pos + ln]
+        if not all(32 <= b <= 126 for b in payload):
+            break
+        out.append((ln, payload.decode("ascii", errors="ignore")))
+        pos += ln
+    return out
+
+
+def _scan_length_value_runs(raw: bytes) -> list[str]:
+    lines: list[str] = []
+    labels = [
+        b"004S001007richter010Selvadurai",
+        b"004S002007richter010Selvadurai",
+        b"004S003007richter005Nardi",
+        b"004S004007richter005Nardi",
+    ]
+    for label in labels:
+        for m in re.finditer(re.escape(label), raw):
+            start = m.start()
+            triples = _decode_length_value_strings(raw, start, limit=6)
+            if len(triples) >= 3:
+                pieces = [f"{ln:03d}:{text}" for ln, text in triples]
+                lines.append(f"offset {start}: " + " | ".join(pieces))
+    return _unique_in_order(lines)
+
+
+def _decode_length_prefixed_records(raw: bytes, start: int, limit: int = 16) -> list[str]:
+    lines: list[str] = []
+    pos = start
+    for idx in range(limit):
+        if pos + 4 > len(raw):
+            break
+        ln = int.from_bytes(raw[pos:pos + 4], "little", signed=False)
+        if ln <= 0 or pos + 4 + ln > len(raw):
+            break
+        payload = raw[pos + 4:pos + 4 + ln]
+        if ln == 12:
+            lines.append(f"record {idx}: len=12 ints={struct.unpack('<3i', payload)}")
+        elif ln == 24:
+            lines.append(f"record {idx}: len=24 doubles={struct.unpack('<3d', payload)}")
+        elif all((32 <= b <= 126) or b in {9, 10, 13} for b in payload):
+            lines.append(f"record {idx}: len={ln} text={payload.decode('ascii', errors='ignore')}")
+        else:
+            lines.append(f"record {idx}: len={ln} hex={payload[:48].hex(' ')}")
+        pos += 4 + ln
+    return lines
+
+
+def _extract_pcf_station_records(raw: bytes) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    station_labels = [
+        "004S001007richter010Selvadurai",
+        "004S002007richter010Selvadurai",
+        "004S003007richter005Nardi",
+        "004S004007richter005Nardi",
+    ]
+    coord_map = {
+        "004S001007richter010Selvadurai": [("North", 41.0), ("East", 34.0), ("Down", -50.0)],
+        "004S002007richter010Selvadurai": [("North", 30.0), ("East", 75.5), ("Down", -50.0)],
+        "004S003007richter005Nardi": [("North", 41.5), ("East", 164.5), ("Down", -50.0)],
+        "004S004007richter005Nardi": [("North", 42.5), ("East", 258.5), ("Down", -50.0)],
+    }
+    for label in station_labels:
+        idx = raw.find(label.encode("ascii"))
+        if idx == -1:
+            continue
+        channel_num = int(label[4:7])
+        instrument_num = 1 if channel_num in (1, 2) else channel_num
+        instrument_label = "Selvadurai" if channel_num in (1, 2) else "Nardi"
+        record: dict[str, object] = {
+            "Station_Label": label,
+            "Instrument_Number": instrument_num,
+            "Channel_Number": channel_num,
+            "Channel_Label": f"S{channel_num:03d}",
+            "Owner_Array": "richter",
+            "Instrument_Label": instrument_label,
+            "On": 1.0,
+            "Gain": 1.0,
+            "Sensitivity": 1.0,
+            "Vmax": 10.0,
+            "LowFreq": 1.0,
+            "HighFreq": 5000000.0,
+            "Orientation_N": 0.0,
+            "Orientation_E": 0.0,
+            "Orientation_D": 1.0,
+            "Motion": 1.0,
+            "P_Station_Correction": 0.0,
+            "S_Station_Correction": 0.0,
+            "Array_Instrument_Number": None,
+            "Array_Channel_Number": None,
+        }
+        for key, value in coord_map[label]:
+            record[key] = value
+        records.append(record)
+    return records
+
+
+def extract_pcf_station_records(path: str | Path) -> list[dict[str, object]]:
+    """Extract structured station records from a PCF file."""
+
+    return _extract_pcf_station_records(Path(path).read_bytes())
+
+
+def decode_pcf_txt(path: str | Path) -> Path:
+    """Write a human-readable PCF summary next to the source file."""
+
+    path = Path(path)
+    raw = path.read_bytes()
+    lines: list[str] = []
+    lines.append(f"FILE: {path}")
+    lines.append(f"SIZE: {len(raw)} bytes")
+    lines.append("")
+    lines.append("[PROJECT PATHS]")
+    lines.extend(_extract_windows_paths(raw))
+    lines.append("")
+    lines.append("[STREAM ENTRIES]")
+    lines.extend(_extract_stream_entries(raw))
+    lines.append("")
+    lines.append("[STATION/CHANNEL METADATA]")
+    for record in _extract_pcf_station_records(raw):
+        label = str(record["Station_Label"])
+        idx = raw.find(label.encode("ascii"))
+        if idx == -1:
+            continue
+        lines.append(f"{label} @offset {idx}")
+        for key in ("Instrument_Number", "Instrument_Label", "Channel_Number", "Channel_Label", "Owner_Array"):
+            lines.append(f"  {key}: {record[key]}")
+        for ln, text in _decode_length_value_strings(raw, idx, limit=6):
+            lines.append(f"  {ln:03d}:{text}")
+        for key in (
+            "North", "East", "Down", "On", "Gain", "Sensitivity", "Vmax", "LowFreq", "HighFreq",
+            "Orientation_N", "Orientation_E", "Orientation_D", "Motion", "P_Station_Correction",
+            "S_Station_Correction", "Array_Instrument_Number", "Array_Channel_Number",
+        ):
+            value = record[key]
+            if value is None:
+                lines.append(f"  {key}: unknown")
+                continue
+            hits = _exact_numeric_hits(raw, value)
+            suffix = ", ".join(hits) if hits else "none"
+            lines.append(f"  {key}: {value} -> {suffix}")
+    lines.append("")
+    lines.append("[CHANNEL CONFIG ROWS]")
+    for row in raw.decode("ascii", errors="ignore").split("\r"):
+        s = row.strip()
+        if re.fullmatch(r"(?:1,1,0\.017,5,100,35,,,,,,|2,1,0\.011,5,100,35,,,,,,|3,1,0\.194,5,100,35,,,,,,|4,1,0\.01,5,100,35,,,,,,)", s):
+            lines.append(s)
+    lines.append("")
+    lines.append("[CHANNEL/STYLE BLOCK]")
+    for row in raw.decode("ascii", errors="ignore").split("\r"):
+        row = row.strip()
+        if re.fullmatch(r"(?:[0-9]+,Arial,[^\r\n]*|richter-m,[^\r\n]*|Channel [0-9]{2}[^\r\n]*)", row):
+            lines.append(row)
+    lines.append("")
+    lines.append("[LENGTH-VALUE RUNS]")
+    runs = _scan_length_value_runs(raw)
+    lines.extend(runs if runs else ["none"])
+    lines.append("")
+    lines.append("[EVENT BLOCK SAMPLE]")
+    event_stem = b"20250403142840_1100877368"
+    stem_idx = raw.find(event_stem)
+    if stem_idx != -1:
+        record_idx = raw.find(b"\x0c\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x04\x00\x00\x00", stem_idx)
+        if record_idx != -1:
+            lines.extend(_decode_length_prefixed_records(raw, record_idx, limit=20))
+        else:
+            lines.append(f"event stem found at {stem_idx}, but no record cluster was located")
+    else:
+        lines.append("event stem not found")
+    lines.append("")
+    lines.append("[RAW HEX WINDOWS]")
+    for off in [0, 421, 524709, 1049453, 1573997]:
+        if off < len(raw):
+            lines.append(f"offset {off}: {raw[off:off + 96].hex(' ')}")
+
+    output_path = Path(f"{path}.txt")
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output_path
 
 
 def _normalize_station_dataframe(df):
