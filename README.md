@@ -1,6 +1,7 @@
 # RichterPy
 
 Richter/InSite data tools for waveform parsing and metadata conversion.
+Vibe-coded with GPT-5.4 and 5.5 in july-september 2026, starting from existing code debugged by humans.
 
 ## Pipeline Stages
 

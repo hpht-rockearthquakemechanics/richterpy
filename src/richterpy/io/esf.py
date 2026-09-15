@@ -88,9 +88,10 @@ _ESF_NAMED_FIELD_IDS = {
     "dec_sec": 2041,
     "snr": 2052,
     "rms_noise": 2053,
+    "mon_dist": 2056,
     "p_noise": 2057,
     "s_noise": 2058,
-    "mon_dist": 2060,
+    "p_auto_func": 2060,
     "s_auto_func": 2061,
     "confidence": 2062,
     "t0": 2072,
@@ -866,7 +867,7 @@ def extract_esf(
         count=channel_count * samples_per_channel,
         offset=int(layout["header_size_bytes"]),
     )
-    waveform = payload.reshape(channel_count, samples_per_channel).T
+    waveform = payload.reshape(channel_count, samples_per_channel).T.copy()
 
     if channel_offsets is not None:
         offsets = np.asarray(channel_offsets, dtype=np.float64)
@@ -890,7 +891,7 @@ def extract_esf(
         "metadata_records": metadata_records,
     }
 
-    del raw
+    raw._mmap.close()
     return waveform, metadata
 
 
@@ -951,137 +952,6 @@ def _locate_esf_files(path: str | Path) -> list[Path]:
             return list(dict.fromkeys(candidates))
 
     raise FileNotFoundError(f"No ESF files found under {path}")
-
-
-def _locate_atf_files(path: str | Path) -> list[Path]:
-    path = Path(path)
-
-    if path.is_file() and path.suffix.lower() == ".atf":
-        return [path]
-
-    if path.is_dir():
-        search_dir = path if path.name.lower() == "esf" else path / "ESF"
-        if search_dir.is_dir():
-            candidates = sorted(search_dir.rglob("*.ATF")) + sorted(search_dir.rglob("*.atf"))
-            return list(dict.fromkeys(candidates))
-
-    raise FileNotFoundError(f"No ATF files found under {path}")
-
-
-def _detect_atf_starttime(path: Path, header: dict[str, str]):
-    from datetime import datetime
-
-    from obspy import UTCDateTime
-
-    time_str = header.get("Time")
-    date_str = header.get("Date")
-    if time_str and date_str:
-        try:
-            dt = datetime.strptime(f"{date_str} {time_str}", "%d-%m-%Y %H:%M:%S.%f")
-            return UTCDateTime(dt)
-        except Exception:
-            pass
-
-    stem = path.stem
-    m = re.search(r"(\d{8})_(\d{6})", stem)
-    if m:
-        try:
-            dt = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
-            return UTCDateTime(dt)
-        except Exception:
-            pass
-    return UTCDateTime(0)
-
-
-def _parse_atf_header(path: Path) -> tuple[dict[str, str], np.ndarray]:
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines or not lines[0].startswith("ATF"):
-        raise ValueError(f"Not a valid ATF file: {path}")
-
-    header: dict[str, str] = {}
-    trace_start = None
-    for idx, line in enumerate(lines):
-        if line == "[TraceData]":
-            trace_start = idx + 1
-            break
-        if ";" in line and "=" in line:
-            for part in line.split(";"):
-                part = part.strip()
-                if not part or "=" not in part:
-                    continue
-                key, value = part.split("=", 1)
-                header[key.strip()] = value.strip()
-
-    if trace_start is None:
-        raise ValueError(f"ATF trace data section not found: {path}")
-
-    import numpy as np
-
-    data = np.array([float(line.split()[0]) for line in lines[trace_start:] if line and line[0] not in "["], dtype=np.float64)
-    return header, data
-
-
-def read_atf(path: str | Path, station_channel_map: dict[str, str] | None = None):
-    """Read a single ATF file and return an ObsPy Stream plus metadata."""
-
-    from obspy import Stream, Trace
-
-    path = Path(path)
-    header, data = _parse_atf_header(path)
-    starttime = _detect_atf_starttime(path, header)
-    sample_rate = 1.0 / float(header.get("TSamp", "1.0"))
-
-    channel_name = path.stem.split("_")[-1]
-    station_code = f"S{int(channel_name):02d}" if channel_name.isdigit() else "S01"
-    channel_code = f"CH{channel_name}" if channel_name.isdigit() else "CH1"
-    if station_channel_map:
-        mapped = station_channel_map.get(station_code)
-        if mapped is None:
-            return Stream(), {"source_path": str(path), "header": header, "starttime": starttime, "sample_rate": sample_rate}
-        channel_code = mapped
-
-    trace = Trace(data=data)
-    trace.stats.station = station_code
-    trace.stats.channel = channel_code
-    trace.stats.location = "RAW"
-    trace.stats.network = "RC"
-    trace.stats.starttime = starttime
-    trace.stats.sampling_rate = sample_rate
-
-    metadata = {
-        "source_path": str(path),
-        "header": header,
-        "starttime": starttime,
-        "sample_rate": sample_rate,
-        "trace_points": int(header.get("TracePoints", data.size)),
-    }
-    return Stream(traces=[trace]), metadata
-
-
-def build_atf_stream(path: str | Path, station_channel_map: dict[str, str] | None = None):
-    """Build a master ObsPy Stream from an ATF folder or single file."""
-
-    from obspy import Stream
-
-    path = Path(path)
-    if path.is_file() and path.suffix.lower() == ".atf":
-        return read_atf(path, station_channel_map=station_channel_map)[0]
-
-    atf_paths = _locate_atf_files(path)
-    if not atf_paths:
-        raise FileNotFoundError(f"No .ATF files were found under {path}")
-
-    master_stream = Stream()
-    for atf_path in atf_paths:
-        st, _ = read_atf(atf_path, station_channel_map=station_channel_map)
-        master_stream += st
-
-    if len(master_stream) == 0:
-        raise FileNotFoundError(f"No readable .ATF files were found under {path}")
-
-    master_stream.sort(["starttime", "station", "channel"])
-    return master_stream
 
 
 def inspect_esf_file(path: str | Path) -> dict[str, object]:
