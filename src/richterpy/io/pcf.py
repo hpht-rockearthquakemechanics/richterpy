@@ -179,6 +179,7 @@ def _extract_pcf_station_records(raw: bytes) -> list[dict[str, object]]:
             "Orientation_E": 0.0,
             "Orientation_D": 1.0,
             "Motion": 1.0,
+            "Local_Unit_M": 0.001,
             "P_Station_Correction": 0.0,
             "S_Station_Correction": 0.0,
             "Array_Instrument_Number": None,
@@ -225,7 +226,7 @@ def decode_pcf_txt(path: str | Path) -> Path:
         for key in (
             "North", "East", "Down", "On", "Gain", "Sensitivity", "Vmax", "LowFreq", "HighFreq",
             "Orientation_N", "Orientation_E", "Orientation_D", "Motion", "P_Station_Correction",
-            "S_Station_Correction", "Array_Instrument_Number", "Array_Channel_Number",
+            "S_Station_Correction", "Local_Unit_M", "Array_Instrument_Number", "Array_Channel_Number",
         ):
             value = record[key]
             if value is None:
@@ -288,6 +289,7 @@ def _normalize_station_dataframe(df):
         "orientation_d": "Orientation_D",
         "p_station_correction": "P_Station_Correction",
         "s_station_correction": "S_Station_Correction",
+        "local_unit_m": "Local_Unit_M",
         "array_instrument_number": "Array_Instrument_Number",
         "array_channel_number": "Array_Channel_Number",
     }
@@ -309,6 +311,7 @@ def _normalize_station_dataframe(df):
         "Orientation_D": 1.0,
         "P_Station_Correction": 0.0,
         "S_Station_Correction": 0.0,
+        "Local_Unit_M": 0.001,
     }.items():
         if col not in df.columns:
             df[col] = default

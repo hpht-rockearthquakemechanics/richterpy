@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 
+from richterpy.coordinates import DEFAULT_DATUM, load_datum_config, local_to_geographic
 from richterpy.io.esf import (
     _footer_bytes,
     build_esf_catalog_from_esfs,
@@ -45,6 +46,19 @@ def _make_esf(channel_count: int, samples_per_channel: int) -> bytes:
 
 
 class ESFMetadataTests(unittest.TestCase):
+    def test_default_datum_uses_millimeter_local_units(self):
+        geo = local_to_geographic(1000.0, 2000.0, 3000.0, DEFAULT_DATUM)
+        self.assertAlmostEqual(geo["latitude"], DEFAULT_DATUM.latitude - 1.0 * 9.009e-6)
+        self.assertAlmostEqual(geo["longitude"], DEFAULT_DATUM.longitude - 2.0 * 1.209e-5)
+        self.assertAlmostEqual(geo["elevation"], DEFAULT_DATUM.elevation - 3.0)
+        self.assertAlmostEqual(geo["depth"], 3.0 - DEFAULT_DATUM.elevation)
+        self.assertEqual(geo["local_unit_m"], 0.001)
+
+    def test_meera_datum_config(self):
+        config_path = Path(__file__).resolve().parents[1] / "config/MEERA.ini"
+        datum = load_datum_config(config_path)
+        self.assertEqual(datum, DEFAULT_DATUM)
+
     def test_synthetic_variable_layouts_and_tagged_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             for channel_count, samples_per_channel in [(1, 17), (3, 5), (4, 65536), (12, 23)]:
@@ -118,8 +132,45 @@ class ESFMetadataTests(unittest.TestCase):
 
         catalog = build_esf_catalog_from_esfs(event_path)
         self.assertEqual(len(catalog), 1)
-        self.assertAlmostEqual(catalog[0].origins[0].latitude, metadata["north"])
-        self.assertAlmostEqual(catalog[0].origins[0].longitude, metadata["east"])
+        origin = catalog[0].origins[0]
+        self.assertIsNone(origin.latitude)
+        self.assertIsNone(origin.longitude)
+        self.assertIsNone(origin.depth)
+        comments = {comment.text for comment in origin.comments}
+        self.assertIn(f"north: {metadata['north']}", comments)
+        self.assertIn(f"east: {metadata['east']}", comments)
+        self.assertIn(f"down: {metadata['down']}", comments)
+        self.assertIn(f"loc_units: {metadata['loc_units']}", comments)
+
+    def test_catalog_uses_explicit_datum_if_provided(self):
+        root = Path(__file__).resolve().parents[1] / "data/m0013"
+        event_path = root / "ESF/20250403/20250403_0001.ESF"
+        if not event_path.exists():
+            self.skipTest("Local ESF validation file is not installed")
+
+        metadata = extract_esf_event_metadata(event_path)
+        catalog = build_esf_catalog_from_esfs(event_path, datum=DEFAULT_DATUM)
+        origin = catalog[0].origins[0]
+        geo = local_to_geographic(metadata["north"], metadata["east"], metadata["down"], DEFAULT_DATUM)
+        self.assertAlmostEqual(origin.latitude, geo["latitude"])
+        self.assertAlmostEqual(origin.longitude, geo["longitude"])
+        self.assertAlmostEqual(origin.depth, geo["depth"])
+        self.assertIn("local_unit_m: 0.001", {comment.text for comment in origin.comments})
+
+    def test_catalog_uses_datum_config_if_provided(self):
+        root = Path(__file__).resolve().parents[1]
+        event_path = root / "data/m0013/ESF/20250403/20250403_0001.ESF"
+        config_path = root / "config/MEERA.ini"
+        if not event_path.exists():
+            self.skipTest("Local ESF validation file is not installed")
+
+        metadata = extract_esf_event_metadata(event_path)
+        catalog = build_esf_catalog_from_esfs(event_path, datum_config=config_path)
+        origin = catalog[0].origins[0]
+        geo = local_to_geographic(metadata["north"], metadata["east"], metadata["down"], load_datum_config(config_path))
+        self.assertAlmostEqual(origin.latitude, geo["latitude"])
+        self.assertAlmostEqual(origin.longitude, geo["longitude"])
+        self.assertAlmostEqual(origin.depth, geo["depth"])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import struct
 
 import numpy as np
 
+from richterpy.coordinates import Datum, local_to_geographic, resolve_datum
+
 
 HEADER_DOUBLES = 4
 CHANNEL_COUNT = 4
@@ -897,14 +899,36 @@ def _locate_esf_event_file(esf_root: Path, event_date: str, event_number: int) -
     raise FileNotFoundError(f"No ESF file found for event {event_date}_{event_number:04d} under {esf_root}")
 
 
-def build_esf_catalog(path: str | Path, output_path: str | Path | None = None):
+def build_esf_catalog(
+    path: str | Path,
+    output_path: str | Path | None = None,
+    datum: Datum | dict[str, float] | None = None,
+    datum_config: str | Path | None = None,
+    local_unit_m: float | None = None,
+):
     """Build an ObsPy QuakeML catalog directly from individual ESF files."""
 
-    return build_esf_catalog_from_esfs(path, output_path=output_path)
+    return build_esf_catalog_from_esfs(
+        path,
+        output_path=output_path,
+        datum=datum,
+        datum_config=datum_config,
+        local_unit_m=local_unit_m,
+    )
 
 
-def build_esf_catalog_from_esfs(path: str | Path, output_path: str | Path | None = None):
-    """Build an ObsPy QuakeML catalog directly from individual ESF files."""
+def build_esf_catalog_from_esfs(
+    path: str | Path,
+    output_path: str | Path | None = None,
+    datum: Datum | dict[str, float] | None = None,
+    datum_config: str | Path | None = None,
+    local_unit_m: float | None = None,
+):
+    """Build an ObsPy QuakeML catalog directly from individual ESF files.
+
+    Local ESF coordinates are preserved as comments. Geographic coordinates are
+    populated only when ``datum`` or ``datum_config`` is provided explicitly.
+    """
 
     try:
         from obspy import UTCDateTime
@@ -922,6 +946,9 @@ def build_esf_catalog_from_esfs(path: str | Path, output_path: str | Path | None
         raise FileNotFoundError(f"No .ESF files were found under {path}")
 
     cat = Catalog()
+    geographic_datum = None
+    if datum is not None or datum_config is not None:
+        geographic_datum = resolve_datum(datum, datum_config=datum_config, local_unit_m=local_unit_m)
     for esf_path in esf_paths:
         event_metadata = extract_esf_event_metadata(esf_path)
         event_stem = str(event_metadata.get("event_stem") or esf_path.stem)
@@ -932,26 +959,40 @@ def build_esf_catalog_from_esfs(path: str | Path, output_path: str | Path | None
         if event_metadata.get("dec_sec") is not None:
             origin_time += float(event_metadata["dec_sec"])
 
-        north = float(event_metadata.get("north") or 0.0)
-        east = float(event_metadata.get("east") or 0.0)
-        down = float(event_metadata.get("down") or 0.0)
         loc_mag = event_metadata.get("loc_mag")
         loc_error = event_metadata.get("loc_error")
         residual = event_metadata.get("residual")
         confidence = event_metadata.get("confidence")
+        geo = None
+        if geographic_datum is not None:
+            geo = local_to_geographic(
+                event_metadata.get("north") or 0.0,
+                event_metadata.get("east") or 0.0,
+                event_metadata.get("down") or 0.0,
+                geographic_datum,
+            )
 
         origin = Origin(
             time=origin_time,
-            latitude=north,
-            longitude=east,
-            depth=-down,
+            latitude=geo["latitude"] if geo is not None else None,
+            longitude=geo["longitude"] if geo is not None else None,
+            depth=geo["depth"] if geo is not None else None,
             comments=[
                 Comment(text=f"event_label: {event_metadata.get('label') or ''}"),
                 Comment(text=f"event_stem: {event_stem}"),
             ],
         )
 
-        for name in ("number", "enabled", "located", "dec_sec", "t0", "snr", "rms_noise", "mon_dist"):
+        if geo is not None:
+            origin.comments.append(Comment(text=f"datum_latitude: {geographic_datum.latitude}"))
+            origin.comments.append(Comment(text=f"datum_longitude: {geographic_datum.longitude}"))
+            origin.comments.append(Comment(text=f"datum_elevation: {geographic_datum.elevation}"))
+            origin.comments.append(Comment(text=f"local_unit_m: {geographic_datum.local_unit_m}"))
+
+        for name in (
+            "number", "enabled", "located", "north", "east", "down", "loc_units",
+            "dec_sec", "t0", "snr", "rms_noise", "mon_dist",
+        ):
             if event_metadata.get(name) is not None:
                 origin.comments.append(Comment(text=f"{name}: {event_metadata[name]}"))
         if loc_error is not None:
