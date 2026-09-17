@@ -1,53 +1,48 @@
 ```mermaid
   graph LR;
-      A-->B;
-      B-->C;
+      A-->A1 & A2;
+      A-->B
       subgraph InSite
-      C-->D;
-      D-->E;
-      E-->F;
-      F-->G;
+      B-->B1;
+      B-->C
+      C-->C1;
       end
-      B-->O1;
-      B-->O2;
-      C-->O2;
-      E-->O3;
-      G-->O4;
+      A1 & A2 --> O1
+      A2 & B1 --> O2
+      B1 & C1 --> O3
+      C1 --> O4
       O1 & O2 & O3 & O4 --> O;
       O-->P;
 
 A{
     RECORD STREAM
 }
-B{
+A1{
     .wve and .srm
-    +
-    station metadata notes
 }
-C{
+A2{    
+    sensorarray/EXPERIMENT.csv
+}
+B{
+    MAKE INSITE PROJECT
+}
+B1{
     EXPERIMENT/:
     EXPERIMENT.pcf
-    sensorarray/EXPERIMENT.csv
+    optional: sensorarray/EXPERIMENT.csv
     optional: stream/ with .gts and .gwf
     optional: export/EXPERIMENT.csv
 }
-D{
+C{
     TRIGGER EVENTS
 }
-E{
+C1{
     EXPERIMENT/:
     BSF/ with .bif and .bsf
     optional: ESF/ with .esf
     optional: ESF/ with .atf
     optional: export/EXPERIMENT event data.csv
     optional: export/EXPERIMENT instrument data.csv
-}
-F{
-    LOCATE EVENTS
-}
-G{
-    EXPERIMENT/:
-    locations/EXPERIMENT.RPT
 }
 O1{
     insitedata2snuffler.py
@@ -66,7 +61,7 @@ O3{
 
 }
 O4{
-    rpt2quakeml.py
+    build_esf_catalog_from_esfs.py
 }
 O{
     Obspy

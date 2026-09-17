@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 
 from richterpy.coordinates import DEFAULT_DATUM, load_datum_config, local_to_geographic
+from richterpy.convert.esf_quakeml import convert_esf_quakeml, default_output_path
 from richterpy.io.esf import (
     _footer_bytes,
     build_esf_catalog_from_esfs,
@@ -171,6 +172,70 @@ class ESFMetadataTests(unittest.TestCase):
         self.assertAlmostEqual(origin.latitude, geo["latitude"])
         self.assertAlmostEqual(origin.longitude, geo["longitude"])
         self.assertAlmostEqual(origin.depth, geo["depth"])
+
+    def test_esf_quakeml_converter_writes_output(self):
+        from obspy import read_events
+
+        root = Path(__file__).resolve().parents[1]
+        event_path = root / "data/m0013/ESF/20250403/20250403_0001.ESF"
+        config_path = root / "config/MEERA.ini"
+        if not event_path.exists():
+            self.skipTest("Local ESF validation file is not installed")
+
+        metadata = extract_esf_event_metadata(event_path)
+        geo = local_to_geographic(metadata["north"], metadata["east"], metadata["down"], load_datum_config(config_path))
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "events.xml"
+            catalog = convert_esf_quakeml(event_path, output_path=output_path, datum_config=config_path)
+            self.assertEqual(len(catalog), 1)
+            self.assertTrue(output_path.exists())
+            self.assertGreater(output_path.stat().st_size, 0)
+
+            roundtrip = read_events(str(output_path))
+            self.assertEqual(len(roundtrip), 1)
+            origin = roundtrip[0].origins[0]
+            self.assertAlmostEqual(origin.latitude, geo["latitude"])
+            self.assertAlmostEqual(origin.longitude, geo["longitude"])
+            self.assertAlmostEqual(origin.depth, geo["depth"])
+            comments = {comment.text for comment in origin.comments}
+            self.assertIn(f"north: {metadata['north']}", comments)
+            self.assertIn(f"east: {metadata['east']}", comments)
+            self.assertIn(f"down: {metadata['down']}", comments)
+            self.assertIn("local_unit_m: 0.001", comments)
+
+    def test_esf_quakeml_default_output_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(default_output_path(directory), Path(directory) / "events.xml")
+        self.assertEqual(default_output_path("sample.ESF"), Path("sample.xml"))
+
+    def test_esf_directory_quakeml_roundtrip_if_available(self):
+        from obspy import read_events
+
+        root = Path(__file__).resolve().parents[1]
+        source_paths = [
+            root / "data/m0013/ESF/20250403/20250403_0001.ESF",
+            root / "data/m0013/ESF/20250403/20250403_0002.ESF",
+        ]
+        config_path = root / "config/MEERA.ini"
+        if not all(path.exists() for path in source_paths):
+            self.skipTest("Local ESF validation files are not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            for source_path in source_paths:
+                (directory_path / source_path.name).write_bytes(source_path.read_bytes())
+            output_path = directory_path / "events.xml"
+            catalog = convert_esf_quakeml(directory_path, output_path=output_path, datum_config=config_path)
+            roundtrip = read_events(str(output_path))
+
+        self.assertEqual(len(catalog), 2)
+        self.assertEqual(len(roundtrip), 2)
+        self.assertEqual([str(event.resource_id) for event in catalog], sorted(str(event.resource_id) for event in catalog))
+        for event in roundtrip:
+            origin = event.origins[0]
+            self.assertIsNotNone(origin.latitude)
+            self.assertIsNotNone(origin.longitude)
+            self.assertIn("local_unit_m: 0.001", {comment.text for comment in origin.comments})
 
 
 if __name__ == "__main__":

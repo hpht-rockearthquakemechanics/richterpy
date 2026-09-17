@@ -5,13 +5,33 @@ Vibe-coded with GPT-5.4 and 5.5 in july-september 2026, starting from existing c
 
 ## Pipeline Stages
 
-This project follows the `RICHTER.md` flow:
+`RICHTER.md` is the ground truth for pipeline naming.
 
-- `B -> O1 -> O`: raw streams and handwritten station metadata
-- `B & C -> O2 -> O`: raw streams and PCF station metadata
-- `E -> O3 -> O`: BSF or ESF or ATF streams, PCF station metadata, ESF event metadata
-- `G -> O4 -> O`: event locations
-- `O -> P`: optional Pyrocko/Snuffler export
+- `A`: record stream.
+- `A1`: `.wve` and `.srm` raw stream files.
+- `A2`: `sensorarray/EXPERIMENT.csv` station metadata.
+- `B`: make InSite project.
+- `B1`: `EXPERIMENT/` project folder with `EXPERIMENT.pcf` and optional exports.
+- `C`: trigger events.
+- `C1`: triggered event products, including `BSF/`, optional `ESF/`, optional `ATF`, and optional exported CSVs.
+- `O`: ObsPy objects and files.
+- `P`: optional Pyrocko/Snuffler view/export.
+
+Effective processing stages implemented here:
+
+- `A1 & A2 -> O1 -> O`: raw `.srm/.wve` streams plus station CSV into ObsPy `Stream` and StationXML.
+- `A2 & B1 -> O2 -> O`: raw `.srm/.wve` streams plus PCF-derived station metadata into ObsPy `Stream` and StationXML.
+- `B1 & C1 -> O3 -> O`: triggered BSF/ESF/ATF streams plus PCF-derived station metadata into ObsPy `Stream`.
+- `C1 -> O4 -> O`: ESF-native event metadata into ObsPy `Catalog` / QuakeML.
+- `O -> P`: optional Pyrocko/Snuffler visualization.
+
+Stage-to-code mapping:
+
+- `O1`: `richterpy.convert.stations.convert_stations(...)` plus `richterpy.convert.snuffler.build_master_stream(...)`.
+- `O2`: `richterpy.io.pcf.convert_pcf_to_csv(...)`, then `convert_stations(...)`, then `build_master_stream(...)`.
+- `O3`: `richterpy.io.bsf.build_bsf_stream(...)`, `richterpy.io.esf.build_esf_stream(...)`, or `richterpy.io.atf.build_atf_stream(...)`.
+- `O4`: `richterpy.io.esf.build_esf_catalog_from_esfs(...)` or CLI `richter-esf-quakeml`.
+- `P`: `richterpy.convert.snuffler` helpers and Pyrocko `trace.snuffle(...)`.
 
 ## Binary Layout
 
@@ -46,14 +66,17 @@ The parser currently extracts:
 - `src/richterpy/obspy/station_inventory.py`: ObsPy station inventory output
 - `src/richterpy/obspy/event_catalog.py`: ObsPy event catalog output
 - `src/richterpy/pyrocko/snuffler_export.py`: optional Pyrocko export
-- `src/richterpy/io/esf.py`: low-level ESF/BSF/PCF parser and plotting helpers
+- `src/richterpy/io/esf.py`: low-level ESF parser, ESF stream builder, and ESF catalog builder
+- `src/richterpy/io/bsf.py`: BSF stream builder
+- `src/richterpy/io/atf.py`: ATF stream builder
+- `src/richterpy/io/pcf.py`: PCF station metadata extraction and PCF-to-CSV helper
 - `src/richterpy/`: canonical package source tree
 - `richterpy/__init__.py`: import shim for working-tree use
-- `esf_waveforms_to_obspy.py`: legacy-compatible ESF waveform CLI
-- `project_metadata_to_stationxml.py`: project metadata to StationXML CLI
-- `event_data_to_quakeml.py`: event metadata to QuakeML CLI
-- `insite_waveforms_to_snuffler.py`: InSite waveform to Snuffler CLI
-- `esf_to_obspy.py`: legacy wrapper around `richterpy.io.esf`
+- `project_metadata_to_stationxml.py`: source-tree wrapper for StationXML conversion
+- `event_data_to_quakeml.py`: source-tree wrapper for CSV event metadata to QuakeML
+- `esf_to_quakeml.py`: source-tree wrapper for ESF-native QuakeML generation
+- `insite_waveforms_to_snuffler.py`: source-tree wrapper for InSite waveform to Snuffler export
+- `esf_waveforms_to_obspy.py` / `esf_to_obspy.py`: source-tree wrappers around `richterpy.io.esf`
 - `esf_interactive.ipynb`: interactive notebook for inspection
 
 ## Usage
@@ -92,21 +115,47 @@ from richterpy.io.esf import read_esf
 stream, metadata = read_esf('data/20250403/20250403_0144.ESF')
 ```
 
-Convert PCF project metadata to StationXML (`C -> O2`):
+Build StationXML from CSV station metadata (`A2 -> O1`):
 
 ```bash
-python project_metadata_to_stationxml.py m0013
-python project_metadata_to_stationxml.py --csv-path /path/to/custom.csv --output-path /tmp/custom.xml
+richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
 ```
 
-Convert event CSV metadata to QuakeML (`E -> O3`):
+Build StationXML from PCF project metadata (`B1 -> O2`):
+
+```python
+from richterpy.io.pcf import convert_pcf_to_csv
+from richterpy.convert.stations import convert_stations
+
+convert_pcf_to_csv("data/m0013/m0013.pcf", output_path="data/playground/m0013.pcf.csv")
+convert_stations(
+    csv_path="data/playground/m0013.pcf.csv",
+    output_path="data/playground/m0013.xml",
+    datum_config="config/MEERA.ini",
+)
+```
+
+Decode a PCF report for inspection (`B1` diagnostics):
 
 ```bash
-python event_data_to_quakeml.py m0013
-python event_data_to_quakeml.py --csv-path /path/to/custom-event.csv --output-path /tmp/custom-event.xml
+richter-project-metadata data/m0013/m0013.pcf
 ```
 
-Export triggered waveforms to Snuffler (`O -> P`):
+Convert exported event CSV metadata to QuakeML, when available (`C1 -> O4`, CSV path):
+
+```bash
+python event_data_to_quakeml.py --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
+python event_data_to_quakeml.py --csv-path /path/to/custom-event.csv --output-path /tmp/custom-event.xml --datum-config config/MEERA.ini
+```
+
+Convert ESF-native event metadata to QuakeML (`C1 -> O4`, preferred ESF-native path):
+
+```bash
+python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini
+python esf_to_quakeml.py data/m0013/ESF/20250403/20250403_0001.ESF --output-path /tmp/event.xml --datum-config config/MEERA.ini
+```
+
+Export ObsPy products to Snuffler (`O -> P`):
 
 ```bash
 python insite_waveforms_to_snuffler.py m0013 --output-mode snuffler
@@ -125,8 +174,9 @@ Installed console commands:
 ```bash
 richter-project-metadata data/m0013/m0013.pcf
 richter-event-waveforms data/m0013/ESF/20250403/20250403_0001.ESF --plot
-richter-stationxml m0013
-richter-quakeml m0013
+richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
+richter-quakeml --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
+richter-esf-quakeml data/m0013/ESF/20250403 --datum-config config/MEERA.ini
 richter-snuffler m0013 --output-mode obspy
 richter-esf data/m0013/ESF/20250403/20250403_0001.ESF --report
 ```
@@ -135,18 +185,17 @@ Legacy compatibility commands still work:
 
 ```bash
 python esf_to_obspy.py data/20250403/20250403_0144.ESF --report
-python stations_csv2stationxml.py m0013
-python events_csv2quakeml.py m0013
+python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini
+python stations_csv2stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
+python project_metadata_to_stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
+python events_csv2quakeml.py --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
 python insitedata2snuffler.py m0013 --output-mode obspy
 ```
 
 ### Stage Notes
 
-- `B` data is currently handled by the low-level readers in `src/richterpy/io/`.
-- `C` is represented by `src/richterpy/insite/project_metadata.py` and `src/richterpy/obspy/station_inventory.py`.
-- `E` is represented by `src/richterpy/insite/event_waveforms.py` and `src/richterpy/obspy/event_catalog.py`.
-- `G` is reserved for `src/richterpy/insite/location_reports.py`.
-- `O1`, `O2`, `O3`, and `O4` are the ObsPy-facing conversion layers.
+- `A1`, `A2`, `B1`, `C1`, `O1`, `O2`, `O3`, `O4`, `O`, and `P` follow `RICHTER.md`.
+- `O1`, `O2`, `O3`, and `O4` are the ObsPy-facing conversion layers implemented by this package.
 - `P` is the optional Pyrocko/Snuffler export path.
 
 ## Notes
@@ -159,5 +208,5 @@ python insitedata2snuffler.py m0013 --output-mode obspy
 ## Tests
 
 - Minimal smoke tests live under `tests/`.
-- Run them with `pytest` from the repository root.
+- Run the non-interactive tests with `python -m unittest tests.test_pcf tests.test_esf_metadata tests.test_io_smoke` from the repository root.
 - `tests/test_snuffler_smoke.py` is a small Pyrocko Snuffler smoke script, so it may open an interactive window when executed.

@@ -75,7 +75,7 @@ def _extract_windows_paths(raw: bytes) -> list[str]:
     paths: list[str] = []
     for s in _extract_ascii_strings(raw):
         if re.search(r"[A-Za-z]:\\", s):
-            if any(ext in s.lower() for ext in [".csv", ".rpt", ".esf", ".bsf", ".bif"]) or "m0013" in s.lower():
+            if any(ext in s.lower() for ext in [".csv", ".rpt", ".esf", ".bsf", ".bif"]) or "insitelab_projects" in s.lower():
                 paths.append(s)
     return _unique_in_order(paths)
 
@@ -103,20 +103,82 @@ def _decode_length_value_strings(raw: bytes, start: int, limit: int = 16) -> lis
 
 def _scan_length_value_runs(raw: bytes) -> list[str]:
     lines: list[str] = []
-    labels = [
-        b"004S001007richter010Selvadurai",
-        b"004S002007richter010Selvadurai",
-        b"004S003007richter005Nardi",
-        b"004S004007richter005Nardi",
-    ]
-    for label in labels:
-        for m in re.finditer(re.escape(label), raw):
-            start = m.start()
-            triples = _decode_length_value_strings(raw, start, limit=6)
-            if len(triples) >= 3:
-                pieces = [f"{ln:03d}:{text}" for ln, text in triples]
-                lines.append(f"offset {start}: " + " | ".join(pieces))
+    for start, *_ in _candidate_station_runs(raw):
+        triples = _decode_length_value_strings(raw, start, limit=6)
+        if len(triples) >= 3:
+            pieces = [f"{ln:03d}:{text}" for ln, text in triples]
+            lines.append(f"offset {start}: " + " | ".join(pieces))
     return _unique_in_order(lines)
+
+
+def _encoded_length_value_run(values: list[str]) -> str:
+    return "".join(f"{len(value):03d}{value}" for value in values)
+
+
+def _candidate_station_runs(raw: bytes) -> list[tuple[int, str, str, str, str]]:
+    candidates: list[tuple[int, str, str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in re.finditer(rb"\d{3}S\d{3}", raw):
+        start = match.start()
+        triples = _decode_length_value_strings(raw, start, limit=4)
+        if len(triples) < 3:
+            continue
+        values = [value for _, value in triples[:3]]
+        channel_label, owner_array, instrument_label = values
+        if not re.fullmatch(r"S\d{3}", channel_label):
+            continue
+        key = (channel_label, owner_array, instrument_label)
+        if key in seen:
+            continue
+        seen.add(key)
+        station_label = _encoded_length_value_run(values)
+        candidates.append((start, station_label, channel_label, owner_array, instrument_label))
+    return candidates
+
+
+def _read_station_numeric_block(raw: bytes, label_offset: int) -> dict[str, float] | None:
+    start = label_offset - 144
+    if start < 0 or start + 112 > len(raw):
+        return None
+    values = struct.unpack("<14d", raw[start:start + 112])
+    local_unit_m = values[6]
+    if not (0 < local_unit_m < 1):
+        return None
+    if any(abs(value) > 10_000_000 for value in values):
+        return None
+    return {
+        "North": values[0],
+        "East": values[1],
+        "Down": values[2],
+        "Orientation_N": values[3],
+        "Orientation_E": values[4],
+        "Orientation_D": values[5],
+        "Local_Unit_M": local_unit_m,
+        "P_Station_Correction": values[7],
+        "On": values[8],
+        "Gain": values[9],
+        "Vmax": values[10],
+        "LowFreq": values[11],
+        "HighFreq": values[12],
+        "Axis_Number": values[13],
+    }
+
+
+def _read_station_header(raw: bytes, label_offset: int) -> dict[str, int] | None:
+    start = label_offset - 176
+    if start < 0 or start + 32 > len(raw):
+        return None
+    values = struct.unpack("<8i", raw[start:start + 32])
+    instrument_number = values[5]
+    channel_number = values[6]
+    if instrument_number <= 0 or channel_number <= 0:
+        return None
+    return {
+        "Instrument_Number": instrument_number,
+        "Channel_Number": channel_number,
+        "Array_Instrument_Number": instrument_number,
+        "Array_Channel_Number": channel_number,
+    }
 
 
 def _decode_length_prefixed_records(raw: bytes, start: int, limit: int = 16) -> list[str]:
@@ -143,31 +205,18 @@ def _decode_length_prefixed_records(raw: bytes, start: int, limit: int = 16) -> 
 
 def _extract_pcf_station_records(raw: bytes) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
-    station_labels = [
-        "004S001007richter010Selvadurai",
-        "004S002007richter010Selvadurai",
-        "004S003007richter005Nardi",
-        "004S004007richter005Nardi",
-    ]
-    coord_map = {
-        "004S001007richter010Selvadurai": [("North", 41.0), ("East", 34.0), ("Down", -50.0)],
-        "004S002007richter010Selvadurai": [("North", 30.0), ("East", 75.5), ("Down", -50.0)],
-        "004S003007richter005Nardi": [("North", 41.5), ("East", 164.5), ("Down", -50.0)],
-        "004S004007richter005Nardi": [("North", 42.5), ("East", 258.5), ("Down", -50.0)],
-    }
-    for label in station_labels:
-        idx = raw.find(label.encode("ascii"))
-        if idx == -1:
+    for idx, label, channel_label, owner_array, instrument_label in _candidate_station_runs(raw):
+        header_values = _read_station_header(raw, idx) or {}
+        numeric_values = _read_station_numeric_block(raw, idx)
+        if numeric_values is None:
             continue
-        channel_num = int(label[4:7])
-        instrument_num = 1 if channel_num in (1, 2) else channel_num
-        instrument_label = "Selvadurai" if channel_num in (1, 2) else "Nardi"
+        channel_num = int(header_values.get("Channel_Number", int(channel_label[1:])))
         record: dict[str, object] = {
             "Station_Label": label,
-            "Instrument_Number": instrument_num,
+            "Instrument_Number": header_values.get("Instrument_Number", channel_num),
             "Channel_Number": channel_num,
-            "Channel_Label": f"S{channel_num:03d}",
-            "Owner_Array": "richter",
+            "Channel_Label": channel_label,
+            "Owner_Array": owner_array,
             "Instrument_Label": instrument_label,
             "On": 1.0,
             "Gain": 1.0,
@@ -182,11 +231,10 @@ def _extract_pcf_station_records(raw: bytes) -> list[dict[str, object]]:
             "Local_Unit_M": 0.001,
             "P_Station_Correction": 0.0,
             "S_Station_Correction": 0.0,
-            "Array_Instrument_Number": None,
-            "Array_Channel_Number": None,
+            "Array_Instrument_Number": header_values.get("Array_Instrument_Number"),
+            "Array_Channel_Number": header_values.get("Array_Channel_Number"),
         }
-        for key, value in coord_map[label]:
-            record[key] = value
+        record.update(numeric_values)
         records.append(record)
     return records
 
@@ -225,7 +273,7 @@ def decode_pcf_txt(path: str | Path) -> Path:
             lines.append(f"  {ln:03d}:{text}")
         for key in (
             "North", "East", "Down", "On", "Gain", "Sensitivity", "Vmax", "LowFreq", "HighFreq",
-            "Orientation_N", "Orientation_E", "Orientation_D", "Motion", "P_Station_Correction",
+            "Orientation_N", "Orientation_E", "Orientation_D", "Motion", "Axis_Number", "P_Station_Correction",
             "S_Station_Correction", "Local_Unit_M", "Array_Instrument_Number", "Array_Channel_Number",
         ):
             value = record[key]
@@ -253,8 +301,8 @@ def decode_pcf_txt(path: str | Path) -> Path:
     lines.extend(runs if runs else ["none"])
     lines.append("")
     lines.append("[EVENT BLOCK SAMPLE]")
-    event_stem = b"20250403142840_1100877368"
-    stem_idx = raw.find(event_stem)
+    stem_match = re.search(rb"20\d{12}_\d+", raw)
+    stem_idx = stem_match.start() if stem_match else -1
     if stem_idx != -1:
         record_idx = raw.find(b"\x0c\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x04\x00\x00\x00", stem_idx)
         if record_idx != -1:
@@ -287,6 +335,7 @@ def _normalize_station_dataframe(df):
         "orientation_n": "Orientation_N",
         "orientation_e": "Orientation_E",
         "orientation_d": "Orientation_D",
+        "axis_number": "Axis_Number",
         "p_station_correction": "P_Station_Correction",
         "s_station_correction": "S_Station_Correction",
         "local_unit_m": "Local_Unit_M",
@@ -312,6 +361,7 @@ def _normalize_station_dataframe(df):
         "P_Station_Correction": 0.0,
         "S_Station_Correction": 0.0,
         "Local_Unit_M": 0.001,
+        "Axis_Number": 2.0,
     }.items():
         if col not in df.columns:
             df[col] = default

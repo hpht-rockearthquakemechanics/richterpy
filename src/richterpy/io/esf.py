@@ -827,10 +827,15 @@ def _locate_esf_files(path: str | Path) -> list[Path]:
         return [path]
 
     if path.is_dir():
-        search_dir = path if path.name.lower() == "esf" else path / "ESF"
+        candidates = sorted(path.rglob("*.ESF")) + sorted(path.rglob("*.esf"))
+        if candidates:
+            return list(dict.fromkeys(candidates))
+
+        search_dir = path / "ESF"
         if search_dir.is_dir():
             candidates = sorted(search_dir.rglob("*.ESF")) + sorted(search_dir.rglob("*.esf"))
-            return list(dict.fromkeys(candidates))
+            if candidates:
+                return list(dict.fromkeys(candidates))
 
     raise FileNotFoundError(f"No ESF files found under {path}")
 
