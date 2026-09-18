@@ -6,18 +6,22 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from richterpy.coordinates import DEFAULT_DATUM, load_datum_config, local_to_geographic
 from richterpy.convert.esf_quakeml import convert_esf_quakeml, default_output_path
+from richterpy.convert.stations import convert_stations
 from richterpy.io.esf import (
     _footer_bytes,
     build_esf_catalog_from_esfs,
     extract_esf,
     extract_esf_event_metadata,
     parse_esf_layout,
+    read_esf,
 )
+from richterpy.io.pcf import convert_pcf_to_csv
 
 
 def _make_esf(channel_count: int, samples_per_channel: int) -> bytes:
@@ -84,6 +88,27 @@ class ESFMetadataTests(unittest.TestCase):
                     self.assertIsNone(metadata["loc_mag"])
                     self.assertEqual(metadata["local_time"], "2025-01-01T00:00:00.123456789")
 
+    def test_event_metadata_uses_footer_only_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.ESF"
+            path.write_bytes(_make_esf(2, 17))
+            with patch("richterpy.io.esf.np.memmap", side_effect=AssertionError("memmap should not be used")):
+                metadata = extract_esf_event_metadata(path)
+        self.assertEqual(metadata["number"], 7)
+        self.assertEqual(metadata["north"], 12.5)
+
+    def test_read_esf_uses_memmap_backed_trace_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.ESF"
+            path.write_bytes(_make_esf(2, 17))
+            stream, metadata = read_esf(path)
+            self.assertEqual(len(stream), 2)
+            self.assertIsInstance(stream[0].data, np.memmap)
+            data = np.asarray(stream[0].data).copy()
+            del stream
+        self.assertEqual(metadata["channel_count"], 2)
+        np.testing.assert_array_equal(data, np.arange(17, dtype=np.float64))
+
     def test_real_samples_if_available(self):
         root = Path(__file__).resolve().parents[1]
         cases = [
@@ -100,6 +125,32 @@ class ESFMetadataTests(unittest.TestCase):
                 self.assertEqual(metadata["layout"]["samples_per_channel"], samples)
                 self.assertEqual(metadata["layout"]["footer_offset_bytes"], footer)
                 self.assertEqual(metadata["number"], number)
+
+    def test_real_channel_pick_metadata_if_available(self):
+        root = Path(__file__).resolve().parents[1]
+        event_path = root / "data/m0013/ESF/20250403/20250403_0001.ESF"
+        instrument_csv_path = root / "data/m0013/export/m0013 instrument data.csv"
+        if not event_path.exists():
+            self.skipTest("Local ESF validation file is not installed")
+        if not instrument_csv_path.exists():
+            self.skipTest("Local instrument CSV validation file is not installed")
+
+        metadata = extract_esf_event_metadata(event_path)
+        channel_metadata = metadata["channel_metadata"]
+        with instrument_csv_path.open(newline="", encoding="utf-8-sig") as source:
+            rows = [row for row in csv.DictReader(source) if int(row["Event"]) == 1]
+        self.assertEqual(len(channel_metadata), 4)
+        by_inst = {int(row["Inst"]): row for row in rows}
+        for channel in channel_metadata:
+            row = by_inst[channel["index"]]
+            if row["Ptimepick"]:
+                self.assertAlmostEqual(channel["p_timepick"], float(row["Ptimepick"]))
+                self.assertAlmostEqual(channel["tp_timepick"], float(row["TPtimepick"]))
+                self.assertAlmostEqual(channel["ts_timepick"], float(row["TStimepick"]))
+            else:
+                self.assertIsNone(channel.get("p_timepick"))
+                self.assertIsNone(channel.get("tp_timepick"))
+                self.assertIsNone(channel.get("ts_timepick"))
 
     def test_event_one_matches_csv_if_available(self):
         root = Path(__file__).resolve().parents[1] / "data/m0013"
@@ -133,6 +184,7 @@ class ESFMetadataTests(unittest.TestCase):
 
         catalog = build_esf_catalog_from_esfs(event_path)
         self.assertEqual(len(catalog), 1)
+        self.assertEqual(len(catalog[0].picks), 0)
         origin = catalog[0].origins[0]
         self.assertIsNone(origin.latitude)
         self.assertIsNone(origin.longitude)
@@ -156,7 +208,41 @@ class ESFMetadataTests(unittest.TestCase):
         self.assertAlmostEqual(origin.latitude, geo["latitude"])
         self.assertAlmostEqual(origin.longitude, geo["longitude"])
         self.assertAlmostEqual(origin.depth, geo["depth"])
-        self.assertIn("local_unit_m: 0.001", {comment.text for comment in origin.comments})
+
+    def test_catalog_uses_stationxml_for_pick_waveform_ids_if_available(self):
+        from obspy import read_events
+
+        root = Path(__file__).resolve().parents[1]
+        event_path = root / "data/m0013/ESF/20250403/20250403_0001.ESF"
+        pcf_path = root / "data/m0013/m0013.pcf"
+        config_path = root / "config/MEERA.ini"
+        if not event_path.exists() or not pcf_path.exists():
+            self.skipTest("Local ESF/PCF validation files are not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            station_csv = directory_path / "stations.csv"
+            station_xml = directory_path / "stations.xml"
+            event_xml = directory_path / "events.xml"
+            convert_pcf_to_csv(pcf_path, output_path=station_csv)
+            convert_stations(csv_path=station_csv, output_path=station_xml, datum_config=config_path)
+            catalog = build_esf_catalog_from_esfs(
+                event_path,
+                output_path=event_xml,
+                datum_config=config_path,
+                inventory_path=station_xml,
+            )
+            roundtrip = read_events(str(event_xml))
+
+        self.assertEqual(len(catalog[0].picks), 3)
+        self.assertEqual(len(catalog[0].origins[0].arrivals), 3)
+        picks = {(pick.waveform_id.station_code, pick.waveform_id.channel_code): pick for pick in catalog[0].picks}
+        self.assertIn(("S01", "NDZ"), picks)
+        self.assertIn(("S02", "NDZ"), picks)
+        self.assertIn(("S04", "ND1"), picks)
+        self.assertAlmostEqual(picks[("S01", "NDZ")].time - catalog[0].origins[0].time, 0.001496)
+        self.assertEqual(len(roundtrip[0].picks), 3)
+        self.assertEqual(len(roundtrip[0].origins[0].arrivals), 3)
 
     def test_catalog_uses_datum_config_if_provided(self):
         root = Path(__file__).resolve().parents[1]

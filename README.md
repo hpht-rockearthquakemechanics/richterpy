@@ -1,7 +1,16 @@
 # RichterPy
 
 Richter/InSite data tools for waveform parsing and metadata conversion.
-Vibe-coded with GPT-5.4 and 5.5 in july-september 2026, starting from existing code debugged by humans.
+Vibe-coded with GPT-5.4 in july 2026 and with GPT-5.5 in september 2026, starting from existing code vibed but debugged by humans.
+
+## Installation tips
+
+To be implemented from notes.txt
+### WSL2
+#### conda
+#### mamba
+### PS
+#### conda
 
 ## Pipeline Stages
 
@@ -151,8 +160,8 @@ python event_data_to_quakeml.py --csv-path /path/to/custom-event.csv --output-pa
 Convert ESF-native event metadata to QuakeML (`C1 -> O4`, preferred ESF-native path):
 
 ```bash
-python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini
-python esf_to_quakeml.py data/m0013/ESF/20250403/20250403_0001.ESF --output-path /tmp/event.xml --datum-config config/MEERA.ini
+python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
+python esf_to_quakeml.py data/m0013/ESF/20250403/20250403_0001.ESF --output-path /tmp/event.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
 ```
 
 Export ObsPy products to Snuffler (`O -> P`):
@@ -176,7 +185,7 @@ richter-project-metadata data/m0013/m0013.pcf
 richter-event-waveforms data/m0013/ESF/20250403/20250403_0001.ESF --plot
 richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
 richter-quakeml --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
-richter-esf-quakeml data/m0013/ESF/20250403 --datum-config config/MEERA.ini
+richter-esf-quakeml data/m0013/ESF/20250403 --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
 richter-snuffler m0013 --output-mode obspy
 richter-esf data/m0013/ESF/20250403/20250403_0001.ESF --report
 ```
@@ -185,7 +194,7 @@ Legacy compatibility commands still work:
 
 ```bash
 python esf_to_obspy.py data/20250403/20250403_0144.ESF --report
-python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini
+python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
 python stations_csv2stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
 python project_metadata_to_stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
 python events_csv2quakeml.py --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
@@ -203,6 +212,7 @@ python insitedata2snuffler.py m0013 --output-mode obspy
 - The ATF files are optional.
 - When present, they are useful for calibration and verification.
 - The ESF parser works standalone without them.
+- ESF-native QuakeML can build origins without StationXML, but ESF-derived picks require StationXML or an explicit waveform-ID map so pick waveform IDs are not fabricated.
 - The CLI entrypoints accept explicit path overrides for CSV, XML, waveform, and report companion files.
 
 ## Tests

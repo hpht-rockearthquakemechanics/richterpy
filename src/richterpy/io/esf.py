@@ -74,6 +74,68 @@ def parse_esf_layout(raw) -> dict[str, object]:
     }
 
 
+def _parse_esf_layout_header(header: bytes, file_size: int) -> dict[str, object]:
+    if len(header) < 4:
+        raise ValueError("Truncated ESF header")
+
+    channel_count = int(struct.unpack_from("<I", header, 0)[0])
+    if not 1 <= channel_count <= 12:
+        raise ValueError(f"Unsupported ESF channel count: {channel_count}")
+
+    header_size = 4 * (channel_count + 4)
+    if len(header) < header_size:
+        raise ValueError("Truncated ESF offset table")
+
+    pointers = struct.unpack_from(f"<{channel_count + 1}I", header, 4)
+    encoding, sample_width = struct.unpack_from("<2I", header, 4 * (channel_count + 2))
+    if (encoding, sample_width) != (2, 8):
+        raise ValueError(f"Unsupported ESF sample encoding/width: {encoding}/{sample_width}")
+
+    channel_offsets = [header_size + int(pointer) - 1 for pointer in pointers[:-1]]
+    footer_offset = int(pointers[-1]) - 1
+    boundaries = [*channel_offsets, footer_offset]
+    if not channel_offsets or channel_offsets[0] != header_size:
+        raise ValueError("Invalid ESF first channel offset")
+    if footer_offset <= header_size or footer_offset > file_size:
+        raise ValueError("Invalid ESF footer offset")
+    if any(left >= right for left, right in zip(boundaries, boundaries[1:])):
+        raise ValueError("ESF channel offsets are not strictly increasing")
+
+    lengths = [right - left for left, right in zip(boundaries, boundaries[1:])]
+    if any(length % sample_width for length in lengths):
+        raise ValueError("ESF channel byte lengths are not sample-aligned")
+    samples_per_channel = [length // sample_width for length in lengths]
+    if len(set(samples_per_channel)) != 1:
+        raise ValueError(f"Uneven ESF channel sample counts: {samples_per_channel}")
+
+    return {
+        "channel_count": channel_count,
+        "samples_per_channel": int(samples_per_channel[0]),
+        "header_size_bytes": header_size,
+        "channel_offsets_bytes": channel_offsets,
+        "footer_offset_bytes": footer_offset,
+        "file_size_bytes": file_size,
+        "sample_dtype": DATA_DTYPE,
+    }
+
+
+def _read_esf_layout(path: str | Path) -> dict[str, object]:
+    path = Path(path)
+    file_size = path.stat().st_size
+    with path.open("rb") as source:
+        header = source.read(4 * (12 + 4))
+    return _parse_esf_layout_header(header, file_size)
+
+
+def _read_esf_footer(path: str | Path, layout: dict[str, object] | None = None) -> tuple[dict[str, object], bytes]:
+    path = Path(path)
+    layout = _read_esf_layout(path) if layout is None else layout
+    with path.open("rb") as source:
+        source.seek(int(layout["footer_offset_bytes"]))
+        footer = source.read()
+    return layout, footer
+
+
 _ESF_BASE_INT_FIELD_IDS = {0, 12, 31, 32, 33, 34, 51}
 _ESF_BASE_FLOAT_FIELD_IDS = {35, 36, 37, 39, 40, 41, 43, 44, 45, 47, 48, 49, 50, 52, 53}
 _ESF_NAMED_FIELD_IDS = {
@@ -101,6 +163,37 @@ _ESF_NAMED_FIELD_IDS = {
     "event_stem": 3003,
 }
 
+_ESF_CHANNEL_INT_FIELD_NAMES = {
+    0: "channel_index",
+    1: "sample_count",
+    4: "p_timepick_sample_1based",
+    6: "enabled",
+    13: "located",
+    14: "instrument_number",
+    15: "channel_number",
+    47: "axis_number",
+    48: "motion",
+    51: "sensor_type",
+    52: "pick_valid",
+    55: "trigger_sample",
+    1001: "p_timepick_enabled",
+    1002: "tp_timepick_sample_1based",
+    1003: "ts_timepick_sample_1based",
+    1009: "p_search_enabled",
+    1010: "p_search_start_sample",
+    1011: "p_search_end_sample",
+    1012: "p_window_enabled",
+    1013: "p_window_half_width_samples",
+    1015: "p_pick_window_enabled",
+    1016: "p_pick_window_half_width_samples",
+    1017: "p_pick_window_start_sample",
+    1018: "p_pick_window_end_sample",
+    1019: "p_pick_window_start_sample_alt",
+    1020: "p_pick_window_end_sample_alt",
+    1021: "s_pick_window_start_sample",
+    1022: "s_pick_window_end_sample",
+}
+
 
 def _clean_esf_scalar(value):
     if isinstance(value, float) and (not math.isfinite(value) or abs(value) >= 1e90):
@@ -108,8 +201,7 @@ def _clean_esf_scalar(value):
     return value
 
 
-def _parse_esf_event_fields(raw, layout: dict[str, object]) -> dict[int, object]:
-    footer_offset = int(layout["footer_offset_bytes"])
+def _parse_esf_event_fields_at(raw, footer_offset: int, *, pointer_base: int = 0) -> dict[int, object]:
     if len(raw) - footer_offset < 12:
         raise ValueError("Truncated ESF event footer")
 
@@ -119,7 +211,7 @@ def _parse_esf_event_fields(raw, layout: dict[str, object]) -> dict[int, object]
     values_end = values_offset + value_bytes
     if field_count == 0 or values_end > len(raw):
         raise ValueError("Truncated ESF event field table")
-    if next_pointer != values_end + 1:
+    if next_pointer != pointer_base + values_end + 1:
         raise ValueError("ESF footer next-record pointer disagrees with value size")
 
     field_ids = struct.unpack_from(f"<{field_count}I", raw, ids_offset)
@@ -170,16 +262,91 @@ def _parse_esf_event_fields(raw, layout: dict[str, object]) -> dict[int, object]
     return fields
 
 
+def _parse_esf_event_fields(raw, layout: dict[str, object]) -> dict[int, object]:
+    return _parse_esf_event_fields_at(raw, int(layout["footer_offset_bytes"]))
+
+
+def _parse_esf_channel_records(footer: bytes, layout: dict[str, object]) -> list[dict[str, object]]:
+    """Parse per-channel footer records following the main ESF event record.
+
+    The first event record stores event-level metadata. The next footer block is a
+    per-channel record group with one field table per waveform channel. Field 4
+    has been validated against ATF ``PTime`` headers as a 1-based P-pick sample.
+    """
+
+    pointer_base = int(layout["footer_offset_bytes"])
+    next_pointer, _, _ = struct.unpack_from("<3I", footer, 0)
+    group_offset = next_pointer - pointer_base - 1
+    channel_count = int(layout["channel_count"])
+    if group_offset < 0 or group_offset + channel_count * 4 > len(footer):
+        return []
+
+    relative_offsets = struct.unpack_from(f"<{channel_count}I", footer, group_offset)
+    records: list[dict[str, object]] = []
+    for idx, relative_offset in enumerate(relative_offsets):
+        if relative_offset <= 0:
+            continue
+        header_offset = group_offset + int(relative_offset) - 1 + 16
+        if header_offset + 12 > len(footer):
+            continue
+        _, field_count, value_bytes = struct.unpack_from("<3I", footer, header_offset)
+        if not 0 < field_count < 1000 or value_bytes <= 0:
+            continue
+
+        ids_offset = header_offset + 12
+        values_offset = ids_offset + field_count * 4
+        values_end = values_offset + value_bytes
+        if values_end > len(footer):
+            continue
+        field_ids = struct.unpack_from(f"<{field_count}I", footer, ids_offset)
+        position = values_offset
+        raw_values: dict[int, object] = {}
+        for field_id in field_ids:
+            if field_id < 2000:
+                if position + 4 > values_end:
+                    break
+                raw_values[int(field_id)] = int(struct.unpack_from("<i", footer, position)[0])
+                position += 4
+            elif field_id < 3000:
+                if position + 8 > values_end:
+                    break
+                raw_values[int(field_id)] = float(struct.unpack_from("<d", footer, position)[0])
+                position += 8
+            else:
+                # String fields at the end are not needed for picks and have
+                # variant encodings in observed ESF channel records.
+                break
+
+        named = {
+            name: raw_values[field_id]
+            for field_id, name in _ESF_CHANNEL_INT_FIELD_NAMES.items()
+            if field_id in raw_values
+        }
+        for sample_name, time_name in (
+            ("p_timepick_sample_1based", "p_timepick"),
+            ("tp_timepick_sample_1based", "tp_timepick"),
+            ("ts_timepick_sample_1based", "ts_timepick"),
+        ):
+            sample = named.get(sample_name)
+            if isinstance(sample, int) and sample > 0:
+                named[time_name] = (sample - 1) / SAMPLE_RATE
+        if "p_timepick" in named:
+            named["p_pick_time"] = named["p_timepick"]
+            named["p_pick_sample_1based"] = named["p_timepick_sample_1based"]
+        records.append({
+            "index": idx + 1,
+            "raw_fields": raw_values,
+            **named,
+        })
+    return records
+
+
 def extract_esf_event_metadata(path: str | Path) -> dict[str, object]:
     """Extract structured event metadata directly from a single ESF file."""
 
     path = Path(path)
-    raw = np.memmap(path, dtype="u1", mode="r")
-    try:
-        layout = parse_esf_layout(raw)
-        raw_fields = _parse_esf_event_fields(raw, layout)
-    finally:
-        raw._mmap.close()
+    layout, footer = _read_esf_footer(path)
+    raw_fields = _parse_esf_event_fields_at(footer, 0, pointer_base=int(layout["footer_offset_bytes"]))
 
     metadata = {
         name: _clean_esf_scalar(raw_fields.get(field_id))
@@ -203,6 +370,7 @@ def extract_esf_event_metadata(path: str | Path) -> dict[str, object]:
 
     metadata["layout"] = layout
     metadata["raw_fields"] = raw_fields
+    metadata["channel_metadata"] = _parse_esf_channel_records(footer, layout)
     metadata["field_ids"] = dict(_ESF_NAMED_FIELD_IDS)
     metadata["source_path"] = str(path)
     return metadata
@@ -776,6 +944,46 @@ def extract_esf(
     return waveform, metadata
 
 
+def _read_esf_channel_arrays(path: str | Path, channel_offsets: list[float] | None = None):
+    path = Path(path)
+    layout, footer = _read_esf_footer(path)
+    channel_count = int(layout["channel_count"])
+    samples_per_channel = int(layout["samples_per_channel"])
+    offsets_bytes = list(layout["channel_offsets_bytes"])
+
+    if channel_offsets is not None:
+        offsets = np.asarray(channel_offsets, dtype=np.float64)
+        if offsets.size != channel_count:
+            raise ValueError(f"Expected {channel_count} channel offsets, got {offsets.size}")
+    else:
+        offsets = None
+
+    channels = []
+    for idx, offset_bytes in enumerate(offsets_bytes):
+        channel = np.memmap(path, dtype=DATA_DTYPE, mode="r", offset=int(offset_bytes), shape=(samples_per_channel,))
+        if offsets is not None:
+            channel = channel - offsets[idx]
+        channels.append(channel)
+
+    metadata_records = _extract_metadata_records(footer)
+    metadata = {
+        "header_size_bytes": int(layout["header_size_bytes"]),
+        "footer_offset_bytes": int(layout["footer_offset_bytes"]),
+        "layout": layout,
+        "waveform_start_sample": 0,
+        "waveform_end_sample": samples_per_channel,
+        "waveform_samples": samples_per_channel,
+        "payload_start_double": int(layout["header_size_bytes"]) // 8,
+        "payload_end_double": int(layout["footer_offset_bytes"]) // 8,
+        "sample_rate": SAMPLE_RATE,
+        "channel_count": channel_count,
+        "samples_per_channel": samples_per_channel,
+        "channel_offsets": list(channel_offsets) if channel_offsets is not None else [0.0] * channel_count,
+        "metadata_records": metadata_records,
+    }
+    return channels, metadata
+
+
 def read_esf(
     path: str | Path,
     channel_count: int | None = None,
@@ -788,10 +996,11 @@ def read_esf(
     The waveform channel count and sample count are read from the ESF header.
     """
 
-    waveform, metadata = extract_esf(path, channel_count=channel_count, channel_offsets=channel_offsets)
+    channels, metadata = _read_esf_channel_arrays(path, channel_offsets=channel_offsets)
+    if channel_count is not None and channel_count != metadata["channel_count"]:
+        raise ValueError(f"channel_count disagrees with ESF header: {channel_count} != {metadata['channel_count']}")
     metadata["sample_rate"] = sample_rate
 
-    matrix = waveform
     starttime = _stem_to_datetime(str(metadata.get("metadata_records", {}).get("event_stem") or ""))
 
     try:
@@ -803,14 +1012,14 @@ def read_esf(
         ) from exc
 
     traces = []
-    for idx in range(int(metadata["channel_count"])):
+    for idx, channel in enumerate(channels):
         station_code = f"S{idx + 1:02d}"
         channel_code = f"CH{idx + 1}"
         if station_channel_map:
             channel_code = station_channel_map.get(station_code)
             if channel_code is None:
                 continue
-        trace = Trace(data=matrix[:, idx].copy())
+        trace = Trace(data=channel)
         trace.stats.station = station_code
         trace.stats.channel = channel_code
         trace.stats.starttime = UTCDateTime(starttime) if starttime is not None else UTCDateTime(0)
@@ -904,12 +1113,64 @@ def _locate_esf_event_file(esf_root: Path, event_date: str, event_number: int) -
     raise FileNotFoundError(f"No ESF file found for event {event_date}_{event_number:04d} under {esf_root}")
 
 
+def _inventory_waveform_id_map(inventory) -> dict[int, dict[str, str]]:
+    waveform_map: dict[int, dict[str, str]] = {}
+    for network in inventory:
+        for station in network.stations:
+            if not station.channels:
+                continue
+            match = re.search(r"(\d+)$", station.code)
+            if not match:
+                continue
+            channel = station.channels[0]
+            waveform_map[int(match.group(1))] = {
+                "network_code": network.code,
+                "station_code": station.code,
+                "location_code": channel.location_code,
+                "channel_code": channel.code,
+            }
+    return waveform_map
+
+
+def _normalize_waveform_id_map(waveform_id_map: dict[object, object] | None) -> dict[int, dict[str, str]]:
+    if waveform_id_map is None:
+        return {}
+    normalized: dict[int, dict[str, str]] = {}
+    for key, value in waveform_id_map.items():
+        if isinstance(key, int):
+            index = key
+        else:
+            match = re.search(r"(\d+)$", str(key))
+            if not match:
+                continue
+            index = int(match.group(1))
+
+        if isinstance(value, dict):
+            normalized[index] = {
+                "network_code": str(value["network_code"]),
+                "station_code": str(value["station_code"]),
+                "location_code": str(value["location_code"]),
+                "channel_code": str(value["channel_code"]),
+            }
+        else:
+            normalized[index] = {
+                "network_code": str(value.network_code),
+                "station_code": str(value.station_code),
+                "location_code": str(value.location_code),
+                "channel_code": str(value.channel_code),
+            }
+    return normalized
+
+
 def build_esf_catalog(
     path: str | Path,
     output_path: str | Path | None = None,
     datum: Datum | dict[str, float] | None = None,
     datum_config: str | Path | None = None,
     local_unit_m: float | None = None,
+    inventory=None,
+    inventory_path: str | Path | None = None,
+    waveform_id_map: dict[object, object] | None = None,
 ):
     """Build an ObsPy QuakeML catalog directly from individual ESF files."""
 
@@ -919,6 +1180,9 @@ def build_esf_catalog(
         datum=datum,
         datum_config=datum_config,
         local_unit_m=local_unit_m,
+        inventory=inventory,
+        inventory_path=inventory_path,
+        waveform_id_map=waveform_id_map,
     )
 
 
@@ -928,6 +1192,9 @@ def build_esf_catalog_from_esfs(
     datum: Datum | dict[str, float] | None = None,
     datum_config: str | Path | None = None,
     local_unit_m: float | None = None,
+    inventory=None,
+    inventory_path: str | Path | None = None,
+    waveform_id_map: dict[object, object] | None = None,
 ):
     """Build an ObsPy QuakeML catalog directly from individual ESF files.
 
@@ -936,8 +1203,8 @@ def build_esf_catalog_from_esfs(
     """
 
     try:
-        from obspy import UTCDateTime
-        from obspy.core.event import Catalog, Event, Magnitude, Origin
+        from obspy import UTCDateTime, read_inventory
+        from obspy.core.event import Arrival, Catalog, Event, Magnitude, Origin, Pick, WaveformStreamID
         from obspy.core.event.base import Comment
     except ImportError as exc:  # pragma: no cover - environment specific
         raise ImportError(
@@ -954,6 +1221,13 @@ def build_esf_catalog_from_esfs(
     geographic_datum = None
     if datum is not None or datum_config is not None:
         geographic_datum = resolve_datum(datum, datum_config=datum_config, local_unit_m=local_unit_m)
+
+    resolved_waveform_id_map = _normalize_waveform_id_map(waveform_id_map)
+    if inventory_path is not None:
+        inventory = read_inventory(str(inventory_path))
+    if inventory is not None:
+        resolved_waveform_id_map.update(_inventory_waveform_id_map(inventory))
+
     for esf_path in esf_paths:
         event_metadata = extract_esf_event_metadata(esf_path)
         event_stem = str(event_metadata.get("event_stem") or esf_path.stem)
@@ -1007,10 +1281,37 @@ def build_esf_catalog_from_esfs(
         if confidence is not None:
             origin.comments.append(Comment(text=f"confidence: {confidence}"))
 
+        picks = []
+        arrivals = []
+        for channel_metadata in event_metadata.get("channel_metadata", []):
+            p_timepick = channel_metadata.get("p_timepick")
+            if p_timepick is None:
+                continue
+            channel_index = int(channel_metadata.get("index", len(picks) + 1))
+            waveform_id_values = resolved_waveform_id_map.get(channel_index)
+            if waveform_id_values is None:
+                continue
+            pick = Pick(
+                time=origin_time + float(p_timepick),
+                phase_hint="P",
+                waveform_id=WaveformStreamID(
+                    network_code=waveform_id_values["network_code"],
+                    station_code=waveform_id_values["station_code"],
+                    location_code=waveform_id_values["location_code"],
+                    channel_code=waveform_id_values["channel_code"],
+                ),
+                comments=[
+                    Comment(text=f"p_timepick_sample_1based: {channel_metadata.get('p_timepick_sample_1based')}"),
+                ],
+            )
+            picks.append(pick)
+            arrivals.append(Arrival(pick_id=pick.resource_id, phase="P"))
+        origin.arrivals = arrivals
+
         magnitudes = []
         if loc_mag is not None:
             magnitudes.append(Magnitude(mag=float(loc_mag), magnitude_type="Local Magnitude"))
-        event = Event(origins=[origin], magnitudes=magnitudes, resource_id=event_stem)
+        event = Event(origins=[origin], magnitudes=magnitudes, picks=picks, resource_id=event_stem)
         cat.append(event)
 
     if output_path is not None:

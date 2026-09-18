@@ -21,6 +21,7 @@ def convert_esf_quakeml(
     *,
     datum_config: str | Path | None = None,
     local_unit_m: float | None = None,
+    station_xml_path: str | Path | None = None,
 ):
     """Build a QuakeML catalog directly from ESF files."""
 
@@ -31,6 +32,7 @@ def convert_esf_quakeml(
         output_path=output_path,
         datum_config=datum_config,
         local_unit_m=local_unit_m,
+        inventory_path=station_xml_path,
     )
     print(f"--> ESF QuakeML with {len(catalog)} events written to {output_path}.")
     return catalog
@@ -42,6 +44,7 @@ def main() -> None:
     parser.add_argument("--output-path", help="Explicit QuakeML output path")
     parser.add_argument("--datum-config", help="INI file with [datum] latitude/longitude/elevation_m/local_unit_m")
     parser.add_argument("--local-unit-m", type=float, help="Override meters per local coordinate unit")
+    parser.add_argument("--station-xml-path", help="StationXML inventory used to assign pick waveform IDs")
     args = parser.parse_args()
 
     convert_esf_quakeml(
@@ -49,6 +52,7 @@ def main() -> None:
         output_path=args.output_path,
         datum_config=args.datum_config,
         local_unit_m=args.local_unit_m,
+        station_xml_path=args.station_xml_path,
     )
 
 

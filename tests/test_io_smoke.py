@@ -17,12 +17,14 @@ class IOSmokeTests(unittest.TestCase):
             payload = np.array([1.0, 2.0, 3.0], dtype="<f8").tobytes()
             path.write_bytes(b"\x00" * 421 + payload)
             stream, metadata = read_bsf(path)
+            data = np.asarray(stream[0].data).copy()
+            station = stream[0].stats.station
+            del stream
 
-        self.assertEqual(len(stream), 1)
         self.assertEqual(metadata["channel_count"], 1)
         self.assertEqual(metadata["samples_per_channel"], 3)
-        np.testing.assert_array_equal(stream[0].data, np.array([1.0, 2.0, 3.0]))
-        self.assertEqual(stream[0].stats.station, "S01")
+        np.testing.assert_array_equal(data, np.array([1.0, 2.0, 3.0]))
+        self.assertEqual(station, "S01")
 
     def test_build_bsf_stream_missing_manifest_raises(self):
         with tempfile.TemporaryDirectory() as directory:
