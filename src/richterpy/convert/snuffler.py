@@ -77,7 +77,7 @@ def load_srm_to_stream(srm_filepath, wve_filepath, station_channel_map=None):
 
     meta = wve_file_to_metadata(wve_filepath)
     if not meta:
-        print(f"❌ Could not read WVE for {os.path.basename(srm_filepath)}")
+        print(f"Could not read WVE for {os.path.basename(srm_filepath)}")
         return Stream()
 
     fs = meta.get('Sampling_rate__Hz', 10000000.0)
@@ -90,7 +90,7 @@ def load_srm_to_stream(srm_filepath, wve_filepath, station_channel_map=None):
     data_size_bytes = file_size - HEADER_SIZE
     total_samples = data_size_bytes // 2
     if total_samples % num_channels != 0:
-        print(f"⚠️ Warning: File {os.path.basename(srm_filepath)} appears truncated.")
+        print(f"Warning: File {os.path.basename(srm_filepath)} appears truncated.")
         total_samples = (total_samples // num_channels) * num_channels
 
     samples_per_channel = total_samples // num_channels
@@ -171,11 +171,11 @@ def high_precision_origin_timestamp(origin) -> float:
 def build_master_stream(data_folder: str, station_channel_map=None) -> Stream:
     from obspy import Stream
 
-    print("\n--- 🔍 Searching for Data Waveforms ---")
+    print("\n--- Searching for Data Waveforms ---")
     srm_files = sorted(glob.glob(os.path.join(data_folder, '*.srm')))
 
     if not srm_files:
-        print(f"❌ No .srm files found in directory: {data_folder}")
+        print(f"No .srm files found in directory: {data_folder}")
         return Stream()
 
     print(f"Found {len(srm_files)} SRM files. Assembling master stream...")
@@ -186,7 +186,7 @@ def build_master_stream(data_folder: str, station_channel_map=None) -> Stream:
             st_segment = load_srm_to_stream(srm_path, wve_path, station_channel_map=station_channel_map)
             master_stream += st_segment
         else:
-            print(f"⚠️ Missing .wve file for {os.path.basename(srm_path)}, skipping.")
+            print(f"Missing .wve file for {os.path.basename(srm_path)}, skipping.")
 
     master_stream.sort(['starttime'])
     return master_stream
@@ -206,7 +206,7 @@ def analyze_stream_with_obspy(master_stream: Stream) -> None:
     try:
         master_stream.plot()
     except Exception as e:
-        print(f"⚠️ Could not open ObsPy plot: {e}")
+        print(f"Could not open ObsPy plot: {e}")
 
 
 def run_workflow(
@@ -259,11 +259,11 @@ def run_workflow(
 
     master_stream = build_master_stream(dataFolder, station_channel_map=station_channel_map)
     if len(master_stream) == 0:
-        print('❌ No valid waveform data could be loaded.')
+        print('No valid waveform data could be loaded.')
     elif OUTPUT_MODE == 'snuffler':
-        print('\n✅ All data segments successfully loaded. Parsing to Pyrocko...')
+        print('\nAll data segments successfully loaded. Parsing to Pyrocko...')
         pyrocko_traces = master_stream.to_pyrocko_traces()
-        print('\n🚀 Launching Snuffler UI... Look at your desktop!')
+        print('\nLaunching Snuffler UI... Look at your desktop!')
         trace.snuffle(pyrocko_traces, stations=pyrocko_stations, events=pyrocko_events)
     elif OUTPUT_MODE == 'obspy':
         analyze_stream_with_obspy(master_stream)
