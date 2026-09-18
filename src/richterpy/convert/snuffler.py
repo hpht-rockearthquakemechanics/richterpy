@@ -4,6 +4,7 @@ import argparse
 import glob
 import os
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
@@ -142,16 +143,7 @@ def get_high_precision_events(obspy_catalog):
             pref_mag = ev_obs.preferred_magnitude() or ev_obs.magnitudes[0]
             mag = pref_mag.mag
 
-        final_time = origin.time.timestamp
-        for comment in origin.comments:
-            text = comment.text
-            if text and text.startswith('ns'):
-                try:
-                    time_str = float(text.split(':')[1])
-                    final_time = final_time + time_str * 1e-6
-                    break
-                except Exception as e:
-                    print(f"Failed to parse comment '{text}': {e}")
+        final_time = high_precision_origin_timestamp(origin)
 
         ev_pyr = model.Event(
             lat=lat, lon=lon, depth=depth, time=final_time,
@@ -159,6 +151,21 @@ def get_high_precision_events(obspy_catalog):
         )
         pyrocko_events.append(ev_pyr)
     return pyrocko_events
+
+
+def high_precision_origin_timestamp(origin) -> float:
+    final_time = origin.time.timestamp
+    for comment in origin.comments:
+        text = comment.text
+        if text and text.startswith('ns'):
+            try:
+                # Historical QuakeML comments use "ns" for the fractional
+                # microsecond part left after Python datetime parsing.
+                residual_us = Decimal(text.split(':', 1)[1].strip())
+                return final_time + float(residual_us * Decimal('0.000001'))
+            except (InvalidOperation, ValueError) as e:
+                print(f"Failed to parse comment '{text}': {e}")
+    return final_time
 
 
 def build_master_stream(data_folder: str, station_channel_map=None) -> Stream:
@@ -228,12 +235,12 @@ def run_workflow(
 
     experiment = experiment_id
     if station_xml_path is None:
-        station_xml_path = Path(metadata_root) / experiment / 'ae' / 'red' / f'{experiment}.xml'
+        station_xml_path = Path(metadata_root) / 'playground' / f'{experiment}.stations.csv.xml'
     else:
         station_xml_path = Path(station_xml_path)
 
     if event_xml_path is None:
-        event_xml_path = Path(metadata_root) / experiment / 'ae' / 'red' / f'{experiment} event data.xml'
+        event_xml_path = Path(metadata_root) / 'playground' / f'{experiment}.events.csv.xml'
     else:
         event_xml_path = Path(event_xml_path)
 
