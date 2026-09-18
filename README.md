@@ -81,12 +81,9 @@ The parser currently extracts:
 - `src/richterpy/io/pcf.py`: PCF station metadata extraction and PCF-to-CSV helper
 - `src/richterpy/`: canonical package source tree
 - `richterpy/__init__.py`: import shim for working-tree use
-- `project_metadata_to_stationxml.py`: source-tree wrapper for StationXML conversion
-- `event_data_to_quakeml.py`: source-tree wrapper for CSV event metadata to QuakeML
-- `esf_to_quakeml.py`: source-tree wrapper for ESF-native QuakeML generation
-- `insite_waveforms_to_snuffler.py`: source-tree wrapper for InSite waveform to Snuffler export
-- `esf_waveforms_to_obspy.py` / `esf_to_obspy.py`: source-tree wrappers around `richterpy.io.esf`
-- `esf_interactive.ipynb`: interactive notebook for inspection
+- `pipelines.ipynb`: canonical end-to-end pipeline notebook
+- `notebooks/exploratory/`: older exploratory notebooks
+- `scripts/legacy/`: compatibility wrappers for older root-level script commands
 
 ## Usage
 
@@ -127,7 +124,7 @@ stream, metadata = read_esf('data/20250403/20250403_0144.ESF')
 Build StationXML from CSV station metadata (`A2 -> O1`):
 
 ```bash
-richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
+richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.stations.csv.xml --datum-config config/MEERA.ini
 ```
 
 Build StationXML from PCF project metadata (`B1 -> O2`):
@@ -139,7 +136,7 @@ from richterpy.convert.stations import convert_stations
 convert_pcf_to_csv("data/m0013/m0013.pcf", output_path="data/playground/m0013.pcf.csv")
 convert_stations(
     csv_path="data/playground/m0013.pcf.csv",
-    output_path="data/playground/m0013.xml",
+    output_path="data/playground/m0013.stations.pcf.xml",
     datum_config="config/MEERA.ini",
 )
 ```
@@ -153,29 +150,29 @@ richter-project-metadata data/m0013/m0013.pcf
 Convert exported event CSV metadata to QuakeML, when available (`C1 -> O4`, CSV path):
 
 ```bash
-python event_data_to_quakeml.py --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
-python event_data_to_quakeml.py --csv-path /path/to/custom-event.csv --output-path /tmp/custom-event.xml --datum-config config/MEERA.ini
+richter-quakeml --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.csv.xml --datum-config config/MEERA.ini
+richter-quakeml --csv-path /path/to/custom-event.csv --output-path /tmp/custom-event.xml --datum-config config/MEERA.ini
 ```
 
 Convert ESF-native event metadata to QuakeML (`C1 -> O4`, preferred ESF-native path):
 
 ```bash
-python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
-python esf_to_quakeml.py data/m0013/ESF/20250403/20250403_0001.ESF --output-path /tmp/event.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
+richter-esf-quakeml data/m0013/ESF/20250403 --output-path data/playground/m0013.events.esf.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.stations.pcf.xml
+richter-esf-quakeml data/m0013/ESF/20250403/20250403_0001.ESF --output-path /tmp/event.esf.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.stations.pcf.xml
 ```
 
 Export ObsPy products to Snuffler (`O -> P`):
 
 ```bash
-python insite_waveforms_to_snuffler.py m0013 --output-mode snuffler
-python insite_waveforms_to_snuffler.py --station-xml-path /path/to/station.xml --event-xml-path /path/to/event.xml --data-root /path/to/waveforms
+richter-snuffler m0013 --output-mode snuffler
+richter-snuffler --station-xml-path /path/to/station.xml --event-xml-path /path/to/event.xml --data-root /path/to/waveforms
 ```
 
 Print a decoded ESF report:
 
 ```bash
-python esf_waveforms_to_obspy.py data/20250403/20250403_0144.ESF --report
-python esf_waveforms_to_obspy.py --esf-path "/path/to/custom.ESF" --component-dir "/path/to/component" --event-csv-path "/path/to/event data.csv" --instrument-csv-path "/path/to/instrument data.csv" --report
+richter-esf data/20250403/20250403_0144.ESF --report
+richter-esf --esf-path "/path/to/custom.ESF" --component-dir "/path/to/component" --event-csv-path "/path/to/event data.csv" --instrument-csv-path "/path/to/instrument data.csv" --report
 ```
 
 Installed console commands:
@@ -183,22 +180,22 @@ Installed console commands:
 ```bash
 richter-project-metadata data/m0013/m0013.pcf
 richter-event-waveforms data/m0013/ESF/20250403/20250403_0001.ESF --plot
-richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
-richter-quakeml --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
-richter-esf-quakeml data/m0013/ESF/20250403 --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
+richter-stationxml --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.stations.csv.xml --datum-config config/MEERA.ini
+richter-quakeml --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.csv.xml --datum-config config/MEERA.ini
+richter-esf-quakeml data/m0013/ESF/20250403 --output-path data/playground/m0013.events.esf.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.stations.pcf.xml
 richter-snuffler m0013 --output-mode obspy
 richter-esf data/m0013/ESF/20250403/20250403_0001.ESF --report
 ```
 
-Legacy compatibility commands still work:
+Legacy compatibility wrappers are kept under `scripts/legacy/`, but prefer the installed `richter-*` console commands above for new work.
 
 ```bash
-python esf_to_obspy.py data/20250403/20250403_0144.ESF --report
-python esf_to_quakeml.py data/m0013/ESF/20250403 --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.xml
-python stations_csv2stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
-python project_metadata_to_stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.xml --datum-config config/MEERA.ini
-python events_csv2quakeml.py --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.xml --datum-config config/MEERA.ini
-python insitedata2snuffler.py m0013 --output-mode obspy
+python scripts/legacy/esf_to_obspy.py data/20250403/20250403_0144.ESF --report
+python scripts/legacy/esf_to_quakeml.py data/m0013/ESF/20250403 --output-path data/playground/m0013.events.esf.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.stations.pcf.xml
+python scripts/legacy/stations_csv2stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.stations.csv.xml --datum-config config/MEERA.ini
+python scripts/legacy/project_metadata_to_stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.stations.csv.xml --datum-config config/MEERA.ini
+python scripts/legacy/events_csv2quakeml.py --csv-path "data/m0013/export/m0013 event data.csv" --output-path data/playground/m0013.events.csv.xml --datum-config config/MEERA.ini
+python scripts/legacy/insitedata2snuffler.py m0013 --output-mode obspy
 ```
 
 ### Stage Notes
