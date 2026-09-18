@@ -39,3 +39,4 @@ data/**/*.BSF.txt
 data/**/*.bsf.txt
 data/**/*.ESF.png
 data/**/*.bsf.png
+notebooks/exploratory/cluster_exports/

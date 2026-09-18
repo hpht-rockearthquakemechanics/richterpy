@@ -45,23 +45,35 @@ C1{
     optional: export/EXPERIMENT instrument data.csv
 }
 O1{
-    insitedata2snuffler.py
+    richter-snuffler
+    <i>richterpy.convert.snuffler</i>
     +
-    stations_csv2stationxml.py
+    richter-stationxml
+    <i>richterpy.convert.stations</i>
 }
 O2{
-    insitedata2snuffler.py
+    richter-snuffler
+    <i>richterpy.convert.snuffler</i>
     +
-    stations_pcf2stationxml.py
+    richter-project-metadata
+    <i>richterpy.io.pcf</i>
+    +
+    richter-stationxml
+    <i>richterpy.convert.stations</i>
 }
 O3{
-    bsf2snuffler.py
-    optional: esf2snuffler.py
-    optional: events_csv2quakeml.py
+    richter-event-waveforms
+    <i>richterpy.io.bsf</i>
+    optional: richter-esf
+    optional: <i>richterpy.io.atf</i>
 
 }
 O4{
-    build_esf_catalog_from_esfs.py
+    richter-quakeml
+    <i>richterpy.convert.events</i>
+    +
+    richter-esf-quakeml
+    <i>richterpy.io.esf.build_esf_catalog_from_esfs</i>
 }
 O{
     Obspy
@@ -70,3 +82,5 @@ P{
     Pyrocko
 }
 ```
+
+Note: command-line scripts/entry points are shown in plain text; Python modules and APIs are shown in italics.

@@ -1,7 +1,7 @@
 # RichterPy
 
 Richter/InSite data tools for waveform parsing and metadata conversion.
-Vibe-coded with GPT-5.4 in july 2026 and with GPT-5.5 in september 2026, starting from existing code vibed but debugged by humans.
+Vibe-coded with GPT-5.4 in july 2026 and with GPT-5.5 in september 2026 using OpenCode, starting from existing code vibed with Gemini but debugged by humans.
 
 ## Installation tips
 
@@ -44,7 +44,7 @@ Stage-to-code mapping:
 
 ## Binary Layout
 
-For the files in `data/20250403/`, the `.ESF` file is structured as:
+For the files in `data/m0013/ESF/20250403/`, the `.ESF` file is structured as:
 
 1. `4` little-endian `float64` header values
 2. `4` consecutive waveform blocks
@@ -94,7 +94,7 @@ Read ESF waveform data directly:
 ```python
 from richterpy.io.esf import extract_esf
 
-waveform, metadata = extract_esf('data/20250403/20250403_0144.ESF')
+waveform, metadata = extract_esf('data/m0013/ESF/20250403/20250403_0001.ESF')
 ```
 
 Write an ESF metadata report:
@@ -118,7 +118,7 @@ Build an ObsPy stream from ESF:
 ```python
 from richterpy.io.esf import read_esf
 
-stream, metadata = read_esf('data/20250403/20250403_0144.ESF')
+stream, metadata = read_esf('data/m0013/ESF/20250403/20250403_0001.ESF')
 ```
 
 Build StationXML from CSV station metadata (`A2 -> O1`):
@@ -171,7 +171,7 @@ richter-snuffler --station-xml-path /path/to/station.xml --event-xml-path /path/
 Print a decoded ESF report:
 
 ```bash
-richter-esf data/20250403/20250403_0144.ESF --report
+richter-esf data/m0013/ESF/20250403/20250403_0001.ESF --report
 richter-esf --esf-path "/path/to/custom.ESF" --component-dir "/path/to/component" --event-csv-path "/path/to/event data.csv" --instrument-csv-path "/path/to/instrument data.csv" --report
 ```
 
@@ -190,7 +190,7 @@ richter-esf data/m0013/ESF/20250403/20250403_0001.ESF --report
 Legacy compatibility wrappers are kept under `scripts/legacy/`, but prefer the installed `richter-*` console commands above for new work.
 
 ```bash
-python scripts/legacy/esf_to_obspy.py data/20250403/20250403_0144.ESF --report
+python scripts/legacy/esf_to_obspy.py data/m0013/ESF/20250403/20250403_0001.ESF --report
 python scripts/legacy/esf_to_quakeml.py data/m0013/ESF/20250403 --output-path data/playground/m0013.events.esf.xml --datum-config config/MEERA.ini --station-xml-path data/playground/m0013.stations.pcf.xml
 python scripts/legacy/stations_csv2stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.stations.csv.xml --datum-config config/MEERA.ini
 python scripts/legacy/project_metadata_to_stationxml.py --csv-path data/m0013/sensorarray/m0013.csv --output-path data/playground/m0013.stations.csv.xml --datum-config config/MEERA.ini
