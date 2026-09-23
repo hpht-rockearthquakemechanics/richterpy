@@ -215,5 +215,5 @@ python scripts/legacy/insitedata2snuffler.py m0013 --output-mode obspy
 ## Tests
 
 - Minimal smoke tests live under `tests/`.
-- Run the non-interactive tests with `python -m unittest tests.test_pcf tests.test_esf_metadata tests.test_io_smoke` from the repository root.
-- `tests/test_snuffler_smoke.py` is a small Pyrocko Snuffler smoke script, so it may open an interactive window when executed.
+- Run the non-interactive tests with `python -m unittest tests.test_snuffler_smoke tests.test_pipeline_smoke tests.test_high_precision_events tests.test_pcf tests.test_esf_metadata tests.test_io_smoke` from the repository root.
+- `tests/test_snuffler_smoke.py` is non-interactive; it tests Snuffler/Pyrocko-facing helper behavior without launching a GUI.
