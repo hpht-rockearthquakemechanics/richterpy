@@ -3,14 +3,80 @@
 Richter/InSite data tools for waveform parsing and metadata conversion.
 Vibe-coded with GPT-5.4 in july 2026 and with GPT-5.5 in september 2026 using OpenCode, starting from existing code vibed with Gemini but debugged by humans.
 
-## Installation tips
+## Installation
 
-To be implemented from notes.txt
-### WSL2
-#### conda
-#### mamba
-### PS
-#### conda
+Create or update the recommended conda environment from `environment.yml`:
+
+```bash
+conda env create -f environment.yml
+conda activate richterpy
+```
+
+For an existing environment:
+
+```bash
+conda activate richterpy
+conda env update -f environment.yml
+```
+
+The environment installs the package in editable mode with `pip -e .`, so the installed `richter-*` console commands point at the working tree.
+
+Useful verification commands:
+
+```bash
+richter-stationxml --help
+richter-quakeml --help
+richter-esf-quakeml --help
+python -m unittest tests.test_cli_help tests.test_snuffler_smoke tests.test_pipeline_smoke tests.test_high_precision_events tests.test_pcf tests.test_esf_metadata tests.test_io_smoke
+```
+
+### WSL2 Notes
+
+If waveform data live on the `hphtfear` Windows/network share, install CIFS support and mount it before running workflows that read raw `.srm/.wve` data:
+
+```bash
+sudo apt update
+sudo apt install cifs-utils
+sudo mount -t cifs -o username=hphtfear //hphtfear/hphtfear /mnt/hphtfear
+```
+
+For WSL environments where Pyrocko/Qt/OpenGL rendering has issues, software OpenGL can help:
+
+```bash
+export LIBGL_ALWAYS_SOFTWARE=1
+```
+
+If working from a synced Windows/Drive folder is slow, copy the checkout into the WSL filesystem, excluding generated data and caches:
+
+```bash
+rsync -a --delete \
+  --exclude '.git' \
+  --exclude '.venv' \
+  --exclude 'data/' \
+  --exclude '__pycache__/' \
+  --exclude '.pytest_cache/' \
+  --exclude '.mypy_cache/' \
+  --exclude '.ruff_cache/' \
+  "/mnt/g/Il mio Drive/Stefano/Git_folder/richterpy/" \
+  ~/richterpy/
+```
+
+Then update the environment from inside the copied checkout:
+
+```bash
+cd ~/richterpy
+mamba env update -f environment.yml
+```
+
+### PowerShell Notes
+
+In PowerShell, use the same environment file:
+
+```powershell
+conda env create -f environment.yml
+conda activate richterpy
+conda env update -f environment.yml
+```
 
 ## Pipeline Stages
 
