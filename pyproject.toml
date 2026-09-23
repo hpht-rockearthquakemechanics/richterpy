@@ -34,6 +34,7 @@ richter-project-metadata = "richterpy.insite.project_metadata:main"
 richter-event-waveforms = "richterpy.insite.event_waveforms:main"
 richter-stationxml = "richterpy.convert.stations:main"
 richter-quakeml = "richterpy.convert.events:main"
+richter-esf-quakeml = "richterpy.convert.esf_quakeml:main"
 richter-snuffler = "richterpy.convert.snuffler:main"
 
 [tool.setuptools]

@@ -4,6 +4,7 @@ import argparse
 import glob
 import os
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
@@ -76,7 +77,7 @@ def load_srm_to_stream(srm_filepath, wve_filepath, station_channel_map=None):
 
     meta = wve_file_to_metadata(wve_filepath)
     if not meta:
-        print(f"❌ Could not read WVE for {os.path.basename(srm_filepath)}")
+        print(f"Could not read WVE for {os.path.basename(srm_filepath)}")
         return Stream()
 
     fs = meta.get('Sampling_rate__Hz', 10000000.0)
@@ -89,7 +90,7 @@ def load_srm_to_stream(srm_filepath, wve_filepath, station_channel_map=None):
     data_size_bytes = file_size - HEADER_SIZE
     total_samples = data_size_bytes // 2
     if total_samples % num_channels != 0:
-        print(f"⚠️ Warning: File {os.path.basename(srm_filepath)} appears truncated.")
+        print(f"Warning: File {os.path.basename(srm_filepath)} appears truncated.")
         total_samples = (total_samples // num_channels) * num_channels
 
     samples_per_channel = total_samples // num_channels
@@ -142,16 +143,7 @@ def get_high_precision_events(obspy_catalog):
             pref_mag = ev_obs.preferred_magnitude() or ev_obs.magnitudes[0]
             mag = pref_mag.mag
 
-        final_time = origin.time.timestamp
-        for comment in origin.comments:
-            text = comment.text
-            if text and text.startswith('ns'):
-                try:
-                    time_str = float(text.split(':')[1])
-                    final_time = final_time + time_str * 1e-6
-                    break
-                except Exception as e:
-                    print(f"Failed to parse comment '{text}': {e}")
+        final_time = high_precision_origin_timestamp(origin)
 
         ev_pyr = model.Event(
             lat=lat, lon=lon, depth=depth, time=final_time,
@@ -161,14 +153,29 @@ def get_high_precision_events(obspy_catalog):
     return pyrocko_events
 
 
+def high_precision_origin_timestamp(origin) -> float:
+    final_time = origin.time.timestamp
+    for comment in origin.comments:
+        text = comment.text
+        if text and text.startswith('ns'):
+            try:
+                # Historical QuakeML comments use "ns" for the fractional
+                # microsecond part left after Python datetime parsing.
+                residual_us = Decimal(text.split(':', 1)[1].strip())
+                return final_time + float(residual_us * Decimal('0.000001'))
+            except (InvalidOperation, ValueError) as e:
+                print(f"Failed to parse comment '{text}': {e}")
+    return final_time
+
+
 def build_master_stream(data_folder: str, station_channel_map=None) -> Stream:
     from obspy import Stream
 
-    print("\n--- 🔍 Searching for Data Waveforms ---")
+    print("\n--- Searching for Data Waveforms ---")
     srm_files = sorted(glob.glob(os.path.join(data_folder, '*.srm')))
 
     if not srm_files:
-        print(f"❌ No .srm files found in directory: {data_folder}")
+        print(f"No .srm files found in directory: {data_folder}")
         return Stream()
 
     print(f"Found {len(srm_files)} SRM files. Assembling master stream...")
@@ -179,7 +186,7 @@ def build_master_stream(data_folder: str, station_channel_map=None) -> Stream:
             st_segment = load_srm_to_stream(srm_path, wve_path, station_channel_map=station_channel_map)
             master_stream += st_segment
         else:
-            print(f"⚠️ Missing .wve file for {os.path.basename(srm_path)}, skipping.")
+            print(f"Missing .wve file for {os.path.basename(srm_path)}, skipping.")
 
     master_stream.sort(['starttime'])
     return master_stream
@@ -199,7 +206,7 @@ def analyze_stream_with_obspy(master_stream: Stream) -> None:
     try:
         master_stream.plot()
     except Exception as e:
-        print(f"⚠️ Could not open ObsPy plot: {e}")
+        print(f"Could not open ObsPy plot: {e}")
 
 
 def run_workflow(
@@ -228,12 +235,12 @@ def run_workflow(
 
     experiment = experiment_id
     if station_xml_path is None:
-        station_xml_path = Path(metadata_root) / experiment / 'ae' / 'red' / f'{experiment}.xml'
+        station_xml_path = Path(metadata_root) / 'playground' / f'{experiment}.stations.csv.xml'
     else:
         station_xml_path = Path(station_xml_path)
 
     if event_xml_path is None:
-        event_xml_path = Path(metadata_root) / experiment / 'ae' / 'red' / f'{experiment} event data.xml'
+        event_xml_path = Path(metadata_root) / 'playground' / f'{experiment}.events.csv.xml'
     else:
         event_xml_path = Path(event_xml_path)
 
@@ -252,11 +259,11 @@ def run_workflow(
 
     master_stream = build_master_stream(dataFolder, station_channel_map=station_channel_map)
     if len(master_stream) == 0:
-        print('❌ No valid waveform data could be loaded.')
+        print('No valid waveform data could be loaded.')
     elif OUTPUT_MODE == 'snuffler':
-        print('\n✅ All data segments successfully loaded. Parsing to Pyrocko...')
+        print('\nAll data segments successfully loaded. Parsing to Pyrocko...')
         pyrocko_traces = master_stream.to_pyrocko_traces()
-        print('\n🚀 Launching Snuffler UI... Look at your desktop!')
+        print('\nLaunching Snuffler UI... Look at your desktop!')
         trace.snuffle(pyrocko_traces, stations=pyrocko_stations, events=pyrocko_events)
     elif OUTPUT_MODE == 'obspy':
         analyze_stream_with_obspy(master_stream)

@@ -133,8 +133,9 @@ def _extract_bsf_waveforms(path: str | Path, station_channel_map: dict[str, str]
     import numpy as np
 
     path = Path(path)
-    raw = np.memmap(path, dtype="u1", mode="r")
-    payload = np.frombuffer(raw[421:], dtype="<f8")
+    file_size = path.stat().st_size
+    payload_size = (file_size - 421) // 8
+    payload = np.memmap(path, dtype="<f8", mode="r", offset=421, shape=(payload_size,))
     channel_count, samples_per_channel = _infer_bsf_layout(payload.size, station_channel_map=station_channel_map)
     block = samples_per_channel + 32
     expected_size = (channel_count - 1) * block + samples_per_channel
@@ -148,15 +149,15 @@ def _extract_bsf_waveforms(path: str | Path, station_channel_map: dict[str, str]
     for idx in range(channel_count):
         if idx < channel_count - 1:
             start = idx * block
-            waveforms.append(payload[start : start + samples_per_channel].copy())
+            waveforms.append(payload[start : start + samples_per_channel])
             channel_metadata_tail_f64.append(payload[start + samples_per_channel : start + block].copy())
         else:
             start = idx * block
-            waveforms.append(payload[start : start + samples_per_channel].copy())
+            waveforms.append(payload[start : start + samples_per_channel])
 
     metadata: dict[str, object] = {
         "source_path": str(path),
-        "file_size": int(raw.size),
+        "file_size": int(file_size),
         "payload_size_f64": int(payload.size),
         "sample_rate": 10_000_000.0,
         "starttime": _detect_starttime(path),
@@ -165,7 +166,6 @@ def _extract_bsf_waveforms(path: str | Path, station_channel_map: dict[str, str]
         "channel_metadata_tail_f64": channel_metadata_tail_f64,
     }
 
-    del raw
     return waveforms, metadata
 
 
