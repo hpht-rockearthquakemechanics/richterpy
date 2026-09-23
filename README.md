@@ -84,7 +84,7 @@ The parser currently extracts:
 - `pipelines.ipynb`: canonical end-to-end pipeline notebook
 - `notebooks/exploratory/`: older exploratory notebooks
 - `scripts/legacy/`: compatibility wrappers for older root-level script commands
-- `docs/reverse_engineering/`: living notes for reverse-engineered PCF/ESF binary layouts
+- `docs/reverse_engineering/`: living notes for reverse-engineered PCF/ESF binary layouts and RPT location reports
 
 ## Usage
 
