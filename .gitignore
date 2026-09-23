@@ -43,3 +43,7 @@ notebooks/exploratory/cluster_exports/
 
 # InSite documentation
 docs/
+!docs/
+docs/*
+!docs/reverse_engineering/
+!docs/reverse_engineering/*.md
